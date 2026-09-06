@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from typing import Dict, List, Optional
+import safetensors.torch
 import torch
 from safetensors import safe_open
 
@@ -23,6 +24,7 @@ class SafeTensorsReader:
         self._mean_pooled_tensors: Optional[Dict[str, torch.Tensor]] = None
 
     def _get_shard_handle(self, shard_filename: str):
+        # Cache memory-mapped file handles to avoid repeated syscall overhead
         if shard_filename not in self._open_shards:
             shard_path = str(self.cache_dir / shard_filename)
             self._open_shards[shard_filename] = safe_open(shard_path, framework="pt", device="cpu")
@@ -38,8 +40,7 @@ class SafeTensorsReader:
     def get_protein_activations(self, uniprot_id: str) -> torch.Tensor:
         """
         Retrieve activations for an entire protein sequence.
-        Returns tensor of shape (L, hidden_dim).
-        Index i maps strictly to biological residue i + 1.
+        Returns tensor of shape (L, hidden_dim) where index i maps strictly to biological residue i + 1.
         """
         if uniprot_id not in self.entries:
             raise KeyError(f"UniProt ID '{uniprot_id}' not found in manifest.")
@@ -68,6 +69,7 @@ class SafeTensorsReader:
                 f"Residue position {position} out of bounds for protein {uniprot_id} (length {length})."
             )
 
+        # 1-indexed position maps to 0-indexed offset (position - 1)
         offset = entry["start_offset"] + position - 1
         shard = self._get_shard_handle(entry["shard_file"])
         activations_slice = shard.get_slice("activations")
@@ -79,9 +81,9 @@ class SafeTensorsReader:
         if not mean_file.exists():
             raise FileNotFoundError(f"mean_pooled_embeddings.safetensors not found at {mean_file}")
 
+        # Lazy-load cached dictionary on first request
         if self._mean_pooled_tensors is None:
-            from safetensors.torch import load_file
-            self._mean_pooled_tensors = load_file(str(mean_file))
+            self._mean_pooled_tensors = safetensors.torch.load_file(str(mean_file))
 
         if uniprot_id not in self._mean_pooled_tensors:
             raise KeyError(f"UniProt ID '{uniprot_id}' not found in mean-pooled cache.")

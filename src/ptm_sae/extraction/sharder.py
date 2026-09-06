@@ -38,7 +38,7 @@ class SafeTensorsSharder:
         self._buffer_bytes: int = 0
         self._buffer_tokens: int = 0
 
-        # Optional auxiliary storage
+        # Auxiliary mean-pooled sequence storage
         self._mean_pooled_vectors: Dict[str, torch.Tensor] = {}
 
     def _load_manifest(self):
@@ -47,7 +47,7 @@ class SafeTensorsSharder:
                 self.manifest = json.load(f)
             self.committed_ids = set(self.manifest.get("entries", {}).keys())
         except Exception:
-            # If corrupted or empty, re-initialize
+            # Re-initialize cleanly if file is empty or unparseable
             self.manifest = {
                 "version": "1.0",
                 "total_tokens": 0,
@@ -65,32 +65,27 @@ class SafeTensorsSharder:
         residue_tensor: torch.Tensor,
         mean_pooled_vector: torch.Tensor,
     ):
-        """Add a protein activation tensor to the shard buffer."""
+        """Add a protein activation tensor and its mean-pooled context to the shard buffer."""
         if self.is_committed(uniprot_id):
             return
 
         seq_len = residue_tensor.shape[0]
         tensor_bytes = residue_tensor.nelement() * residue_tensor.element_size()
 
-        # Check if adding this protein exceeds shard size limit
-        if (
-            self._buffer_tensors
-            and (self._buffer_bytes + tensor_bytes) > self.cfg.max_shard_bytes
-        ):
+        # Flush buffer before adding if adding would exceed max shard byte limit
+        if self._buffer_tensors and (self._buffer_bytes + tensor_bytes) > self.cfg.max_shard_bytes:
             self.flush()
 
         start_offset = self._buffer_tokens
         end_offset = start_offset + seq_len
 
         self._buffer_tensors.append(residue_tensor)
-        self._buffer_entries.append(
-            {
-                "uniprot_id": uniprot_id,
-                "length": seq_len,
-                "start_offset": start_offset,
-                "end_offset": end_offset,
-            }
-        )
+        self._buffer_entries.append({
+            "uniprot_id": uniprot_id,
+            "length": seq_len,
+            "start_offset": start_offset,
+            "end_offset": end_offset,
+        })
         self._buffer_bytes += tensor_bytes
         self._buffer_tokens += seq_len
 
@@ -104,11 +99,11 @@ class SafeTensorsSharder:
         shard_filename = f"shard_{self.current_shard_idx:04d}.safetensors"
         shard_path = self.output_dir / shard_filename
 
-        # Concatenate along token dimension -> (total_tokens_in_shard, hidden_dim)
+        # 1. Write contiguous token shard along token dimension (total_tokens, hidden_dim)
         contiguous_shard = torch.cat(self._buffer_tensors, dim=0).contiguous()
         safetensors.torch.save_file({"activations": contiguous_shard}, shard_path)
 
-        # Update manifest entries
+        # 2. Register shard metadata and offsets in manifest
         for entry in self._buffer_entries:
             u_id = entry["uniprot_id"]
             self.manifest["entries"][u_id] = {
@@ -125,25 +120,21 @@ class SafeTensorsSharder:
 
         self.manifest["total_tokens"] += self._buffer_tokens
 
-        # Flush optional mean-pooled vectors if any
+        # 3. Append auxiliary mean-pooled vectors to separate single file
         if self._mean_pooled_vectors:
             mean_path = self.output_dir / "mean_pooled_embeddings.safetensors"
             mean_dict = {k: v.contiguous() for k, v in self._mean_pooled_vectors.items()}
-            if mean_path.exists():
-                existing = safetensors.torch.load_file(mean_path)
-                existing.update(mean_dict)
-                safetensors.torch.save_file(existing, mean_path)
-            else:
-                safetensors.torch.save_file(mean_dict, mean_path)
+            existing = safetensors.torch.load_file(mean_path) if mean_path.exists() else {}
+            existing.update(mean_dict)
+            safetensors.torch.save_file(existing, mean_path)
             self._mean_pooled_vectors.clear()
 
-        # Atomic manifest write
+        # 4. Atomically commit manifest and reset active buffer
         temp_manifest = self.manifest_path.with_suffix(".tmp")
         with open(temp_manifest, "w", encoding="utf-8") as f:
             json.dump(self.manifest, f, indent=2)
         os.replace(temp_manifest, self.manifest_path)
 
-        # Reset buffer for next shard
         self.current_shard_idx += 1
         self._buffer_tensors = []
         self._buffer_entries = []

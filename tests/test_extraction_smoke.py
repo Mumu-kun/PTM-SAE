@@ -4,7 +4,8 @@ import pytest
 import torch
 
 from ptm_sae.config import PipelineConfig
-from ptm_sae.extraction.extractor import EsmExtractor, parse_fasta
+from ptm_sae.data import parse_uniprot_fasta
+from ptm_sae.extraction.extractor import EsmExtractor
 from ptm_sae.extraction.sharder import SafeTensorsSharder
 from ptm_sae.extraction.reader import SafeTensorsReader
 
@@ -13,7 +14,7 @@ def test_esm_extraction_and_sharded_read_smoke(tmp_path):
     # 1. Parse sample FASTA
     fasta_path = Path("data/sample.fasta")
     assert fasta_path.exists(), "Sample FASTA file missing."
-    records, skipped = parse_fasta(fasta_path, max_sequence_length=1022)
+    records, skipped = parse_uniprot_fasta(fasta_path, max_sequence_length=1022)
     assert len(records) == 3, f"Expected 3 records, got {len(records)}"
     assert len(skipped) == 0, f"Expected 0 skipped, got {len(skipped)}"
 
