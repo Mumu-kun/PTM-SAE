@@ -1,0 +1,14 @@
+model:
+  model_name: "facebook/esm2_t33_650M_UR50D"
+  target_layer: 24
+  device: "cuda"
+  dtype: "fp16"
+
+extraction:
+  max_sequence_length: 1022
+  batch_size: 8
+
+sharding:
+  output_dir: "cache/activations/esm2_650m_l24"
+  max_shard_bytes: 536870912  # 512 MB per shard
+  resume: true

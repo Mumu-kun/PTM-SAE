@@ -1,0 +1,14 @@
+model:
+  model_name: "facebook/esm2_t6_8M_UR50D"
+  target_layer: 4
+  device: "auto"
+  dtype: "fp32"  # fp32 ensures universal CPU compatibility for local testing
+
+extraction:
+  max_sequence_length: 1022
+  batch_size: 2
+
+sharding:
+  output_dir: "cache/activations/dev_8m"
+  max_shard_bytes: 10485760  # 10 MB per shard for fast rotation
+  resume: true

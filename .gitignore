@@ -1,0 +1,30 @@
+# Virtual environments
+.venv/
+old/**/.venv/
+**/__pycache__/
+*.py[cod]
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+cache/
+.ipynb_checkpoints/
+
+# Binary data & caches
+checkpoints/
+*.safetensors
+*.pt
+*.parquet
+*.log
+data/raw/
+data/processed/
+data/shards/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Legacy archive
+old/
+scratch/
