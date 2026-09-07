@@ -1,5 +1,6 @@
 """SafeTensors sharded buffer manager with asynchronous background upload and thread safety."""
 
+import contextlib
 import json
 import os
 import threading
@@ -44,17 +45,25 @@ class SafeTensorsSharder:
         }
         self.committed_ids = set()
 
-        # Resumption: sync remote manifest if local manifest is missing
-        if (
-            self.cfg.resume
-            and not self.manifest_path.exists()
-            and self.hub
-            and self.cfg.remote_repo_id
-        ):
+        # Resumption: sync remote manifest and auxiliary embeddings if local is missing
+        if self.cfg.resume and self.hub and self.cfg.remote_repo_id:
             sub = (
                 self.cfg.remote_subpath.rstrip("/") if self.cfg.remote_subpath else None
             )
-            self.hub.fetch_manifest(self.cfg.remote_repo_id, sub, self.manifest_path)
+            if not self.manifest_path.exists():
+                self.hub.fetch_manifest(
+                    self.cfg.remote_repo_id, sub, self.manifest_path
+                )
+
+            mean_path = self.output_dir / "mean_pooled_embeddings.safetensors"
+            if not mean_path.exists():
+                with contextlib.suppress(Exception):
+                    self.hub.hydrate_shard(
+                        self.cfg.remote_repo_id,
+                        sub,
+                        "mean_pooled_embeddings.safetensors",
+                        mean_path,
+                    )
 
         if self.cfg.resume and self.manifest_path.exists():
             self._load_manifest()

@@ -162,26 +162,39 @@ class SafeTensorsReader:
         # Hydrate auxiliary embeddings from remote if missing locally
         if not mean_file.exists() and self.hub and self.remote_repo_id:
             sub = self.remote_subpath.rstrip("/") if self.remote_subpath else None
-            self.hub.hydrate_shard(
-                self.remote_repo_id,
-                sub,
-                "mean_pooled_embeddings.safetensors",
-                mean_file,
-            )
-
-        if not mean_file.exists():
-            raise FileNotFoundError(
-                f"mean_pooled_embeddings.safetensors not found at {mean_file}"
-            )
+            with contextlib.suppress(Exception):
+                self.hub.hydrate_shard(
+                    self.remote_repo_id,
+                    sub,
+                    "mean_pooled_embeddings.safetensors",
+                    mean_file,
+                )
 
         # Lazy-load cached dictionary on first request
         if self._mean_pooled_tensors is None:
-            self._mean_pooled_tensors = safetensors.torch.load_file(str(mean_file))
+            if mean_file.exists():
+                with contextlib.suppress(Exception):
+                    self._mean_pooled_tensors = safetensors.torch.load_file(
+                        str(mean_file)
+                    )
+                if self._mean_pooled_tensors is None:
+                    self._mean_pooled_tensors = {}
+            else:
+                self._mean_pooled_tensors = {}
 
-        if uniprot_id not in self._mean_pooled_tensors:
-            raise KeyError(f"UniProt ID '{uniprot_id}' not found in mean-pooled cache.")
+        if uniprot_id in self._mean_pooled_tensors:
+            return self._mean_pooled_tensors[uniprot_id].clone()
 
-        return self._mean_pooled_tensors[uniprot_id].clone()
+        # Resilient fallback: compute dynamically from shard residue activations
+        if uniprot_id in self.entries:
+            acts = self.get_protein_activations(uniprot_id)
+            mean_vec = acts.mean(dim=0).contiguous()
+            self._mean_pooled_tensors[uniprot_id] = mean_vec
+            return mean_vec.clone()
+
+        raise KeyError(
+            f"UniProt ID '{uniprot_id}' not found in manifest or mean-pooled cache."
+        )
 
     def close(self):
         """Release open memory-map shard handles and cached tensors (Windows safety)."""
