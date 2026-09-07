@@ -1,13 +1,14 @@
 """Deep ingestion module with lightweight reader registry for multi-source PTM datasets."""
-from collections.abc import Callable
-from pathlib import Path
-import re
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
-from ptm_sae.data.schema import PTMObservation, Protein
+import re
+from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
+from typing import Any
+
+from ptm_sae.data.schema import Protein, PTMObservation
 
 # Canonical chemical strata mapping
-STRATUM_MAPPING: Dict[str, str] = {
+STRATUM_MAPPING: dict[str, str] = {
     "S": "serine_threonine",
     "T": "serine_threonine",
     "K": "lysine",
@@ -24,13 +25,13 @@ def get_stratum_for_residue(residue: str) -> str:
 
 
 # Regex patterns for canonical PTM normalization (ordered: specific patterns before general)
-CANONICAL_PTM_PATTERNS: List[Tuple[str, str]] = [
+CANONICAL_PTM_PATTERNS: list[tuple[str, str]] = [
     # O-Glycosylation & O-GlcNAc (before generic acetylation)
     (r"\bo-glcnac", "O-Glycosylation"),
-    (r"\bo-linked glycosylation", "O-Glycosylation"),
+    (r"\bo-linked", "O-Glycosylation"),
     (r"\bo-glycosylation", "O-Glycosylation"),
     # N-Glycosylation
-    (r"\bn-linked glycosylation", "N-Glycosylation"),
+    (r"\bn-linked", "N-Glycosylation"),
     (r"\bn-glycosylation", "N-Glycosylation"),
     # Phosphorylation
     (r"phospho", "Phosphorylation"),
@@ -48,6 +49,12 @@ CANONICAL_PTM_PATTERNS: List[Tuple[str, str]] = [
     # Sumoylation
     (r"sumo", "Sumoylation"),
     (r"-su\b", "Sumoylation"),
+    # Succinylation
+    (r"succinyl", "Succinylation"),
+    # Malonylation
+    (r"malonyl", "Malonylation"),
+    # Crotonylation
+    (r"crotonyl", "Crotonylation"),
 ]
 
 
@@ -61,18 +68,18 @@ def canonicalize_ptm_type(raw_type: str) -> str:
 
 
 def parse_uniprot_fasta(
-    fasta_path_or_text: Union[str, Path],
+    fasta_path_or_text: str | Path,
     max_sequence_length: int = 1022,
-) -> Tuple[List[Protein], List[Tuple[str, int]]]:
+) -> tuple[list[Protein], list[tuple[str, int]]]:
     """
     Parse Swiss-Prot / UniProt FASTA into canonical Protein objects.
     Enforces maximum sequence length limit (<= 1022).
     """
-    valid: List[Protein] = []
-    skipped: List[Tuple[str, int]] = []
+    valid: list[Protein] = []
+    skipped: list[tuple[str, int]] = []
 
     current_header = None
-    current_seq_parts: List[str] = []
+    current_seq_parts: list[str] = []
 
     def flush():
         nonlocal current_header, current_seq_parts
@@ -86,27 +93,32 @@ def parse_uniprot_fasta(
         if len(seq) > max_sequence_length:
             skipped.append((u_id, len(seq)))
         elif len(seq) > 0:
-            valid.append(Protein(
-                uniprot_id=u_id,
-                sequence=seq,
-                length=len(seq),
-                reviewed=True,
-                taxonomy_id=9606,
-                header=current_header,
-            ))
+            valid.append(
+                Protein(
+                    uniprot_id=u_id,
+                    sequence=seq,
+                    length=len(seq),
+                    reviewed=True,
+                    taxonomy_id=9606,
+                    header=current_header,
+                )
+            )
 
         current_header = None
         current_seq_parts = []
 
     # Stream lines from file path or raw string
-    lines = (
-        open(fasta_path_or_text, "r", encoding="utf-8")
-        if isinstance(fasta_path_or_text, Path) or (isinstance(fasta_path_or_text, str) and Path(fasta_path_or_text).exists())
-        else fasta_path_or_text.splitlines()
-    )
+    file_handle = None
+    if isinstance(fasta_path_or_text, Path) or (
+        isinstance(fasta_path_or_text, str) and Path(fasta_path_or_text).exists()
+    ):
+        file_handle = open(fasta_path_or_text, encoding="utf-8")
+        line_stream = file_handle
+    else:
+        line_stream = fasta_path_or_text.splitlines()
 
     try:
-        for line in lines:
+        for line in line_stream:
             line = line.strip()
             if not line:
                 continue
@@ -118,15 +130,15 @@ def parse_uniprot_fasta(
                 current_seq_parts.append(line)
         flush()
     finally:
-        if hasattr(lines, "close"):
-            lines.close()
+        if file_handle is not None:
+            file_handle.close()
 
     return valid, skipped
 
 
 # Reader Registry
-ReaderFunc = Callable[[Path, Any], Iterator[PTMObservation]]
-_READER_REGISTRY: Dict[str, Dict[str, Any]] = {}
+ReaderFunc = Callable[..., Iterator[PTMObservation]]
+_READER_REGISTRY: dict[str, dict[str, Any]] = {}
 
 
 def register_reader(
@@ -137,6 +149,7 @@ def register_reader(
     """
     Decorator registering a specialized PTM site reader with zero multi-file boilerplate.
     """
+
     def decorator(fn: ReaderFunc) -> ReaderFunc:
         _READER_REGISTRY[name.lower()] = {
             "func": fn,
@@ -144,6 +157,7 @@ def register_reader(
             "file_keywords": [k.lower() for k in file_keywords],
         }
         return fn
+
     return decorator
 
 
@@ -154,8 +168,12 @@ def register_reader(
 )
 def _parse_phosphositeplus(path: Path, **kwargs: Any) -> Iterator[PTMObservation]:
     """Parses PhosphoSitePlus export datasets (e.g. Phosphorylation_site_dataset.txt)."""
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        headers: Optional[List[str]] = None
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        headers: list[str] | None = None
+        acc_idx: int = 1
+        mod_idx: int = 4
+        org_idx: int = 6
+        max_idx: int = 6
 
         for line in f:
             line = line.strip()
@@ -175,20 +193,20 @@ def _parse_phosphositeplus(path: Path, **kwargs: Any) -> Iterator[PTMObservation
             if len(parts) <= max_idx or parts[org_idx].strip().lower() != "human":
                 continue
 
-            u_id = parts[acc_idx].strip()
-            mod_rsd = parts[mod_idx].strip()  # e.g. 'S15-p' or 'K382-ub'
+            uniprot_id = parts[acc_idx].strip()
+            modification_label = parts[mod_idx].strip()  # e.g. 'S15-p' or 'K382-ub'
 
-            match = re.search(r"^([A-Z])(\d+)", mod_rsd)
+            match = re.search(r"^([A-Z])(\d+)", modification_label)
             if not match:
                 continue
 
             yield PTMObservation(
                 source_db="PhosphoSitePlus",
-                uniprot_id=u_id,
+                uniprot_id=uniprot_id,
                 position=int(match.group(2)),
                 residue=match.group(1),
-                canonical_ptm_type=canonicalize_ptm_type(mod_rsd),
-                raw_ptm_name=mod_rsd,
+                canonical_ptm_type=canonicalize_ptm_type(modification_label),
+                raw_ptm_name=modification_label,
                 evidence_tier="experimental",
             )
 
@@ -200,16 +218,27 @@ def _parse_phosphositeplus(path: Path, **kwargs: Any) -> Iterator[PTMObservation
 )
 def _parse_dbptm(path: Path, **kwargs: Any) -> Iterator[PTMObservation]:
     """Parses dbPTM tab-delimited site export tables."""
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(path, encoding="utf-8", errors="ignore") as f:
         header_line = f.readline()
         if not header_line:
             return
         headers = [h.strip().lower() for h in header_line.split("\t")]
 
         id_col = next((i for i, h in enumerate(headers) if "id" in h or "acc" in h), 0)
-        ptm_col = next((i for i, h in enumerate(headers) if "ptm" in h or "type" in h), 2)
-        pos_col = next((i for i, h in enumerate(headers) if "pos" in h or "site" in h), 3)
-        flank_col = next((i for i, h in enumerate(headers) if "flank" in h or "seq" in h or "window" in h), None)
+        ptm_col = next(
+            (i for i, h in enumerate(headers) if "ptm" in h or "type" in h), 2
+        )
+        pos_col = next(
+            (i for i, h in enumerate(headers) if "pos" in h or "site" in h), 3
+        )
+        flank_col = next(
+            (
+                i
+                for i, h in enumerate(headers)
+                if "flank" in h or "seq" in h or "window" in h
+            ),
+            None,
+        )
         max_idx = max(id_col, ptm_col, pos_col)
 
         for line in f:
@@ -218,22 +247,30 @@ def _parse_dbptm(path: Path, **kwargs: Any) -> Iterator[PTMObservation]:
                 continue
 
             try:
-                pos = int(parts[pos_col].strip())
+                position = int(parts[pos_col].strip())
             except ValueError:
                 continue
 
-            u_id = parts[id_col].strip()
-            ptm_raw = parts[ptm_col].strip()
-            flank = parts[flank_col].strip() if flank_col is not None and len(parts) > flank_col else None
-            residue = flank[len(flank)//2].upper() if flank and len(flank) > 0 else "S"
+            uniprot_id = parts[id_col].strip()
+            raw_ptm_name = parts[ptm_col].strip()
+            flanking_sequence = (
+                parts[flank_col].strip()
+                if flank_col is not None and len(parts) > flank_col
+                else None
+            )
+            residue = (
+                flanking_sequence[len(flanking_sequence) // 2].upper()
+                if flanking_sequence and len(flanking_sequence) > 0
+                else "S"
+            )
 
             yield PTMObservation(
                 source_db="dbPTM",
-                uniprot_id=u_id,
-                position=pos,
+                uniprot_id=uniprot_id,
+                position=position,
                 residue=residue,
-                canonical_ptm_type=canonicalize_ptm_type(ptm_raw),
-                raw_ptm_name=ptm_raw,
+                canonical_ptm_type=canonicalize_ptm_type(raw_ptm_name),
+                raw_ptm_name=raw_ptm_name,
                 evidence_tier="experimental",
             )
 
@@ -241,10 +278,16 @@ def _parse_dbptm(path: Path, **kwargs: Any) -> Iterator[PTMObservation]:
 # Keyword lookup table for UniProt description-to-residue mapping
 _FEATURE_RESIDUE_KEYWORDS = (
     ("threonine", "T"),
-    ("tyrosine",  "Y"),
-    ("lysine",    "K"),
+    ("tyrosine", "Y"),
+    ("lysine", "K"),
     ("asparagine", "N"),
-    ("cysteine",  "C"),
+    ("cysteine", "C"),
+    ("serine", "S"),
+    ("arginine", "R"),
+    ("histidine", "H"),
+    ("proline", "P"),
+    ("glutamate", "E"),
+    ("aspartate", "D"),
 )
 
 
@@ -255,7 +298,7 @@ _FEATURE_RESIDUE_KEYWORDS = (
 )
 def _parse_uniprot_features(path: Path, **kwargs: Any) -> Iterator[PTMObservation]:
     """Parses exported UniProt Feature tables (TSV)."""
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(path, encoding="utf-8", errors="ignore") as f:
         header_line = f.readline()
         if not header_line:
             return
@@ -280,38 +323,105 @@ def _parse_uniprot_features(path: Path, **kwargs: Any) -> Iterator[PTMObservatio
             if not match:
                 continue
 
-            u_id = parts[entry_idx].strip()
-            pos = int(match.group(1))
-            desc = parts[desc_idx].strip() if len(parts) > desc_idx else feature_key
-            desc_lower = desc.lower()
+            uniprot_id = parts[entry_idx].strip()
+            position = int(match.group(1))
+            feature_description = (
+                parts[desc_idx].strip() if len(parts) > desc_idx else feature_key
+            )
+            description_lower = feature_description.lower()
 
-            # Table-driven residue resolution
-            residue = next((res for kw, res in _FEATURE_RESIDUE_KEYWORDS if kw in desc_lower), "S")
+            # Specific handling for Carbohydrate/Glycosylation vs other modifications
+            if feature_key == "CARBOHYD":
+                if "o-linked" in description_lower or "o-glcnac" in description_lower:
+                    canonical_ptm_type = "O-Glycosylation"
+                    residue = "S"
+                else:
+                    canonical_ptm_type = "N-Glycosylation"
+                    residue = "N"
+            else:
+                canonical_ptm_type = canonicalize_ptm_type(feature_description)
+                residue = next(
+                    (
+                        res
+                        for kw, res in _FEATURE_RESIDUE_KEYWORDS
+                        if kw in description_lower
+                    ),
+                    "S",
+                )
 
             yield PTMObservation(
                 source_db="UniProt",
-                uniprot_id=u_id,
-                position=pos,
+                uniprot_id=uniprot_id,
+                position=position,
                 residue=residue,
-                canonical_ptm_type=canonicalize_ptm_type(desc),
-                raw_ptm_name=desc,
+                canonical_ptm_type=canonical_ptm_type,
+                raw_ptm_name=feature_description,
                 evidence_tier="curated",
             )
 
 
+@register_reader(
+    name="cplm",
+    header_keywords=["cplm0", "cplm1"],
+    file_keywords=["cplm_human", "homo_sapiens", "homo sapiens"],
+)
+def _parse_cplm(path: Path, **kwargs: Any) -> Iterator[PTMObservation]:
+    """Parses CPLM 4.0 species-wise export files (e.g. Homo sapiens.txt)."""
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) < 4:
+                continue
+
+            # Ensure row matches CPLM record pattern
+            if not parts[0].strip().upper().startswith("CPLM"):
+                continue
+
+            uniprot_id = parts[1].strip()
+            try:
+                position = int(parts[2].strip())
+            except ValueError:
+                continue
+
+            raw_ptm_name = parts[3].strip()
+            residue = "K"
+            evidence_tier = (
+                "experimental"
+                if len(parts) > 7 and "exp" in parts[7].lower()
+                else "curated"
+            )
+
+            yield PTMObservation(
+                source_db="CPLM",
+                uniprot_id=uniprot_id,
+                position=position,
+                residue=residue,
+                canonical_ptm_type=canonicalize_ptm_type(raw_ptm_name),
+                raw_ptm_name=raw_ptm_name,
+                evidence_tier=evidence_tier,
+            )
+
+
 # Standard Column Aliases for auto-detecting generic TSV/CSV tables
-COLUMN_ALIASES: Dict[str, List[str]] = {
-    "uniprot_id": ["acc_id", "uniprot", "uniprot_id", "entry", "protein_id", "accession"],
-    "position":   ["pos", "position", "site", "residue_pos", "coord"],
-    "residue":    ["res", "residue", "amino_acid", "aa"],
-    "ptm_type":   ["ptm", "ptm_type", "modification", "mod_name", "mod_type"],
+COLUMN_ALIASES: dict[str, list[str]] = {
+    "uniprot_id": [
+        "acc_id",
+        "uniprot",
+        "uniprot_id",
+        "entry",
+        "protein_id",
+        "accession",
+    ],
+    "position": ["pos", "position", "site", "residue_pos", "coord"],
+    "residue": ["res", "residue", "amino_acid", "aa"],
+    "ptm_type": ["ptm", "ptm_type", "modification", "mod_name", "mod_type"],
 }
 
 
 def _parse_generic_tabular(
     path: Path,
-    column_mapping: Optional[Dict[str, str]] = None,
-    delimiter: Optional[str] = None,
+    column_mapping: dict[str, str] | None = None,
+    delimiter: str | None = None,
     source_name: str = "Generic",
     **kwargs: Any,
 ) -> Iterator[PTMObservation]:
@@ -319,15 +429,22 @@ def _parse_generic_tabular(
     delim = delimiter or ("\t" if str(path).endswith((".tsv", ".tab", ".txt")) else ",")
     col_map = dict(column_mapping) if column_mapping else {}
 
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(path, encoding="utf-8", errors="ignore") as f:
         # Find first non-comment header line
-        header_line = next((line.strip() for line in f if line.strip() and not line.strip().startswith("#")), "")
+        header_line = next(
+            (
+                line.strip()
+                for line in f
+                if line.strip() and not line.strip().startswith("#")
+            ),
+            "",
+        )
         if not header_line:
             return
 
         headers = [h.strip().lower() for h in header_line.split(delim)]
 
-        def find_col(field_name: str) -> Optional[int]:
+        def find_col(field_name: str) -> int | None:
             if field_name in col_map and col_map[field_name].lower() in headers:
                 return headers.index(col_map[field_name].lower())
             for alias in COLUMN_ALIASES.get(field_name, [field_name]):
@@ -341,7 +458,9 @@ def _parse_generic_tabular(
         ptm_idx = find_col("ptm_type")
 
         if id_idx is None or pos_idx is None:
-            raise ValueError(f"Could not locate required columns (uniprot_id, position) in headers: {headers}")
+            raise ValueError(
+                f"Could not locate required columns (uniprot_id, position) in headers: {headers}"
+            )
 
         max_idx = max(id_idx, pos_idx)
 
@@ -351,27 +470,35 @@ def _parse_generic_tabular(
                 continue
 
             try:
-                pos = int(parts[pos_idx].strip())
+                position = int(parts[pos_idx].strip())
             except ValueError:
                 continue
 
-            u_id = parts[id_idx].strip()
-            res = parts[res_idx].strip().upper() if res_idx is not None and len(parts) > res_idx else "S"
-            ptm_raw = parts[ptm_idx].strip() if ptm_idx is not None and len(parts) > ptm_idx else "Phosphorylation"
+            uniprot_id = parts[id_idx].strip()
+            residue = (
+                parts[res_idx].strip().upper()
+                if res_idx is not None and len(parts) > res_idx
+                else "S"
+            )
+            raw_ptm_name = (
+                parts[ptm_idx].strip()
+                if ptm_idx is not None and len(parts) > ptm_idx
+                else "Phosphorylation"
+            )
 
             yield PTMObservation(
                 source_db=source_name,
-                uniprot_id=u_id,
-                position=pos,
-                residue=res,
-                canonical_ptm_type=canonicalize_ptm_type(ptm_raw),
-                raw_ptm_name=ptm_raw,
+                uniprot_id=uniprot_id,
+                position=position,
+                residue=residue,
+                canonical_ptm_type=canonicalize_ptm_type(raw_ptm_name),
+                raw_ptm_name=raw_ptm_name,
                 evidence_tier="curated",
             )
 
 
 def read_ptm_sites(
-    source: Union[str, Path],
+    source: str | Path,
     format: str = "auto",
     **kwargs: Any,
 ) -> Iterator[PTMObservation]:
@@ -389,14 +516,18 @@ def read_ptm_sites(
         return _READER_REGISTRY[fmt_key]["func"](path, **kwargs)
 
     # 2. Header and filename signature matching
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(path, encoding="utf-8", errors="ignore") as f:
         snippet = " ".join(f.readline().lower() for _ in range(5))
 
     file_tag = str(path).lower()
 
     for reader in _READER_REGISTRY.values():
-        headers_match = reader["header_keywords"] and all(k in snippet for k in reader["header_keywords"])
-        filename_match = reader["file_keywords"] and any(k in file_tag for k in reader["file_keywords"])
+        headers_match = reader["header_keywords"] and all(
+            k in snippet for k in reader["header_keywords"]
+        )
+        filename_match = reader["file_keywords"] and any(
+            k in file_tag for k in reader["file_keywords"]
+        )
 
         if headers_match or filename_match:
             return reader["func"](path, **kwargs)

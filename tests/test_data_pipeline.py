@@ -1,30 +1,26 @@
 """Comprehensive test suite for PTM data acquisition, harmonization, and splitting."""
+
+from collections.abc import Iterator
 from pathlib import Path
-import tempfile
-from typing import Iterator
-import pytest
+
 import numpy as np
 
-from ptm_sae.data.schema import (
-    Protein,
-    PTMObservation,
-    UnifiedResidueSite,
-)
+from ptm_sae.data import PTMCorpus, prepare_ptm_corpus
+from ptm_sae.data.fetcher import harmonize_and_validate_ptm_sites
 from ptm_sae.data.ingestion import (
+    canonicalize_ptm_type,
     get_stratum_for_residue,
     parse_uniprot_fasta,
-    canonicalize_ptm_type,
     read_ptm_sites,
     register_reader,
 )
-from ptm_sae.data.fetcher import harmonize_and_validate_ptm_sites
-from ptm_sae.data.splitting import (
-    build_cluster_profiles,
-    solve_milp_partition,
-    solve_greedy_partition,
-    partition_dataset,
+from ptm_sae.data.schema import (
+    Protein,
+    PTMObservation,
 )
-from ptm_sae.data import prepare_ptm_corpus, PTMCorpus
+from ptm_sae.data.splitting import (
+    solve_milp_partition,
+)
 
 
 def test_schema_and_stratum_mapping():
@@ -46,7 +42,8 @@ def test_uniprot_fasta_parsing_and_length_filter():
         ">sp|P04637|P53_HUMAN Cellular tumor antigen p53 OS=Homo sapiens OX=9606 GN=TP53 PE=1 SV=4\n"
         "MEEPQSDPSVEPPLSQETFSDLWKLLPENNVLSPLPSQAMDDLMLSPDDIEQWFTEDPGP\n"
         ">sp|Q_LONG|LONG_HUMAN Very Long Protein OS=Homo sapiens OX=9606\n"
-        + ("A" * 1200) + "\n"
+        + ("A" * 1200)
+        + "\n"
     )
 
     valid, skipped = parse_uniprot_fasta(fasta_content, max_sequence_length=1022)
@@ -90,15 +87,14 @@ def test_register_reader_custom_extension(tmp_path):
     """Verify extending read_ptm_sites with @register_reader with zero multi-file boilerplate."""
     custom_file = tmp_path / "custom_cplm.tsv"
     custom_file.write_text(
-        "MY_ACC\tMY_POS\tMY_AA\tMY_MOD\n"
-        "P04637\t382\tK\tAcetylation\n",
+        "MY_ACC\tMY_POS\tMY_AA\tMY_MOD\nP04637\t382\tK\tAcetylation\n",
         encoding="utf-8",
     )
 
     @register_reader(name="my_cplm", header_keywords=["my_acc", "my_pos"])
     def _parse_custom(path: Path, **kwargs) -> Iterator[PTMObservation]:
-        with open(path, "r") as f:
-            lines = [l.strip().split("\t") for l in f if l.strip()]
+        with open(path) as f:
+            lines = [line.strip().split("\t") for line in f if line.strip()]
         for parts in lines[1:]:
             yield PTMObservation(
                 source_db="MyCPLM",
@@ -211,7 +207,11 @@ def test_milp_and_greedy_cluster_partitioning():
 
     assert set(assignment_milp.keys()) == set(clusters)
     total_tokens = sum(p["tokens"] for p in profiles.values())
-    disc_tokens = sum(profiles[c]["tokens"] for c, part in assignment_milp.items() if part == "discovery")
+    disc_tokens = sum(
+        profiles[c]["tokens"]
+        for c, part in assignment_milp.items()
+        if part == "discovery"
+    )
     ratio = disc_tokens / total_tokens
     assert 0.77 <= ratio <= 0.83
 
@@ -258,3 +258,47 @@ def test_prepare_ptm_corpus_end_to_end(tmp_path):
     assert len(corpus.held_out_proteins) == 1
 
 
+def test_cplm_reader_and_canonicalization(tmp_path):
+    """Verify CPLM format reader, lysine residue assignment, and PTM canonicalization."""
+    cplm_file = tmp_path / "Homo sapiens.txt"
+    cplm_file.write_text(
+        "CPLM000001\tP04637\t120\tUbiquitination\tTP53\tHomo sapiens\tSEQ...\tExp.\t123456\n"
+        "CPLM000002\tP04637\t382\tAcetylation\tTP53\tHomo sapiens\tSEQ...\tDat.\t123457\n"
+        "CPLM000003\tP38398\t50\tSuccinylation\tBRCA1\tHomo sapiens\tSEQ...\tExp.\t123458\n",
+        encoding="utf-8",
+    )
+    obs = list(read_ptm_sites(cplm_file))
+    assert len(obs) == 3
+    assert obs[0].uniprot_id == "P04637"
+    assert obs[0].position == 120
+    assert obs[0].residue == "K"
+    assert obs[0].canonical_ptm_type == "Ubiquitination"
+    assert obs[0].evidence_tier == "experimental"
+
+    assert obs[1].canonical_ptm_type == "Acetylation"
+    assert obs[1].evidence_tier == "curated"
+
+    assert obs[2].canonical_ptm_type == "Succinylation"
+
+
+def test_uniprot_features_reader(tmp_path):
+    """Verify parsing standardized UniProt feature tables and residue keyword extraction."""
+    tsv_file = tmp_path / "uniprot_features.tsv"
+    tsv_file.write_text(
+        "Entry\tFeature key\tPosition(s)\tDescription\n"
+        "P04637\tMOD_RES\t392\tPhosphoserine\n"
+        "P04637\tMOD_RES\t382\tN6-acetyllysine\n"
+        "P38398\tCARBOHYD\t100\tN-linked (GlcNAc...) asparagine\n"
+        "P04637\tMOD_RES\t110\tOmega-N-methylarginine\n",
+        encoding="utf-8",
+    )
+    obs = list(read_ptm_sites(tsv_file))
+    assert len(obs) == 4
+    assert obs[0].canonical_ptm_type == "Phosphorylation"
+    assert obs[0].residue == "S"
+    assert obs[1].canonical_ptm_type == "Acetylation"
+    assert obs[1].residue == "K"
+    assert obs[2].canonical_ptm_type == "N-Glycosylation"
+    assert obs[2].residue == "N"
+    assert obs[3].canonical_ptm_type == "Methylation"
+    assert obs[3].residue == "R"

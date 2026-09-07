@@ -32,12 +32,20 @@ _Avoid_: Token index, sequence offset, position index
 A 1D representation of the entire protein sequence (computed via mean-pooling across all biological residues or extracting the `<cls>` token) stored separately from token shards to provide global gating and subcellular/family conditioning for the modular SAE.
 _Avoid_: Pooled token, whole-protein vector, global embedding
 
+### Remote Storage Authority
+The authoritative cloud repository (Hugging Face Dataset) hosting all published Activation Shards, Auxiliary Sequence Contexts, and split manifests as the single source of truth across local and ephemeral cloud runtimes.
+_Avoid_: Cloud bucket, data drive, remote backup
+
+### Shard Hydration
+The on-demand retrieval and caching of an individual Activation Shard from the Remote Storage Authority to local NVMe scratch storage triggered during SAE training mini-batch consumption.
+_Avoid_: Lazy loading, dataset fetch, pre-downloading
+
 ### Chemical Stratum
 The chemical amino acid class defining the evaluation denominator for an SAE feature (e.g., `serine_threonine`, `lysine`, `asparagine`, `cysteine`, `arginine`, `tyrosine`). Statistical enrichment is calculated strictly within stratum to guard against Residue Collapse.
 _Avoid_: Amino acid group, target residue class
 
 ### Corpus Partition
-The non-overlapping split (`discovery` vs `held_out`) assigned by clustering protein sequences at 50% sequence identity to prevent homology leakage. SAE dictionaries are trained only on `discovery`.
+The 3-way partition hierarchy (`discovery_train`, `discovery_val`, and `held_out`) assigned by clustering protein sequences at 50% sequence identity to prevent homology leakage. SAE dictionaries are trained strictly on `discovery_train` (~70% of tokens), hyperparameter tuning and TopK/L1 sparsity ablations are performed on `discovery_val` (~10% of tokens), and `held_out` (~20% of tokens) is strictly reserved as an unbiased non-homologous benchmark.
 _Avoid_: Train/test split, data fold
 
 ### Negative Tier

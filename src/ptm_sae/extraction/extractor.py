@@ -1,9 +1,12 @@
 """ESM-2 forward hook-based activation extractor."""
-from typing import NamedTuple, Iterator, Optional, Sequence
+
+from collections.abc import Iterator, Sequence
+from typing import NamedTuple
+
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-from ptm_sae.config import ModelConfig, ExtractionConfig
+from ptm_sae.config import ExtractionConfig, ModelConfig
 from ptm_sae.data.schema import Protein
 
 # Canonical dtype table lookup
@@ -16,8 +19,8 @@ _DTYPE_MAP = {
 
 class ExtractionOutput(NamedTuple):
     uniprot_id: str
-    residue_tensor: torch.Tensor        # Shape: (L, hidden_dim) strictly for real amino acids
-    mean_pooled_vector: torch.Tensor    # Shape: (hidden_dim,) global context vector
+    residue_tensor: torch.Tensor  # Shape: (L, hidden_dim) strictly for real amino acids
+    mean_pooled_vector: torch.Tensor  # Shape: (hidden_dim,) global context vector
 
 
 class EsmExtractor:
@@ -29,7 +32,11 @@ class EsmExtractor:
 
         # Resolve compute device
         is_cuda = torch.cuda.is_available()
-        self.device = torch.device("cuda" if (model_cfg.device == "auto" and is_cuda) else (model_cfg.device if model_cfg.device != "auto" else "cpu"))
+        self.device = torch.device(
+            "cuda"
+            if (model_cfg.device == "auto" and is_cuda)
+            else (model_cfg.device if model_cfg.device != "auto" else "cpu")
+        )
 
         # Resolve numerical precision dtype
         self.torch_dtype = _DTYPE_MAP.get(model_cfg.dtype, torch.float32)
@@ -44,7 +51,7 @@ class EsmExtractor:
         self.model.eval()
         self.model.requires_grad_(False)
 
-        self._captured_activations: Optional[torch.Tensor] = None
+        self._captured_activations: torch.Tensor | None = None
         self._register_hook()
 
     def _register_hook(self):
@@ -53,13 +60,17 @@ class EsmExtractor:
 
         # Validate layer index bounds
         if target_layer < 0 or target_layer >= len(encoder_layers):
-            raise ValueError(f"Target layer {target_layer} out of range (model has {len(encoder_layers)} layers).")
+            raise ValueError(
+                f"Target layer {target_layer} out of range (model has {len(encoder_layers)} layers)."
+            )
 
         layer_module = encoder_layers[target_layer]
 
         def hook_fn(module, input_tensor, output_tensor):
             # Extract raw activations from layer output tuple
-            self._captured_activations = output_tensor[0] if isinstance(output_tensor, tuple) else output_tensor
+            self._captured_activations = (
+                output_tensor[0] if isinstance(output_tensor, tuple) else output_tensor
+            )
 
         layer_module.register_forward_hook(hook_fn)
 
@@ -67,9 +78,7 @@ class EsmExtractor:
     def hidden_dim(self) -> int:
         return self.model.config.hidden_size
 
-    def extract_batch(
-        self, records: Sequence[Protein]
-    ) -> Iterator[ExtractionOutput]:
+    def extract_batch(self, records: Sequence[Protein]) -> Iterator[ExtractionOutput]:
         """
         Runs batch through ESM-2 and yields (uniprot_id, residue_tensor, mean_pooled_vector).
         Delimiters (<cls>, <eos>, <pad>) are permanently stripped.

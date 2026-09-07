@@ -1,0 +1,23 @@
+{
+  "uniprot_human_proteome": {
+    "source_name": "UniProt Swiss-Prot Human Proteome",
+    "url_or_path": "https://rest.uniprot.org/uniprotkb/stream?format=fasta&query=%28reviewed%3Atrue%29%20AND%20%28taxonomy_id%3A9606%29",
+    "sha256": "a88cc408225959ec70b54213ecf796ca43ab5605e6227e68dffa7922ce193e3d",
+    "file_size_bytes": 13671912,
+    "timestamp_utc": "1788740608.655012"
+  },
+  "cplm_human_proteome": {
+    "source_name": "CPLM 4.0 Human Lysine Modifications",
+    "url_or_path": "http://cplm.biocuckoo.cn/Download/Homo%20sapiens.zip",
+    "sha256": "f98779e317aedc93ebc137c1c99777c1391f21e4ebfb8db41791149be624021b",
+    "file_size_bytes": 305874512,
+    "timestamp_utc": "1788766315.5781589"
+  },
+  "uniprot_human_ptm_features": {
+    "source_name": "UniProt Swiss-Prot Human PTM Features (ft_mod_res, ft_carbohyd)",
+    "url_or_path": "https://rest.uniprot.org/uniprotkb/stream?format=tsv&query=%28reviewed%3Atrue%29%20AND%20%28taxonomy_id%3A9606%29&fields=accession,ft_mod_res,ft_carbohyd",
+    "sha256": "3f9a9f3c17081aefae1a64799b50c5b47661bdcbad006f4db82b9c2dc74d5fec",
+    "file_size_bytes": 3076656,
+    "timestamp_utc": "1788766345.50409"
+  }
+}

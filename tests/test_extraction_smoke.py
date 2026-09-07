@@ -1,13 +1,16 @@
 """Permanent Invariant Contract Test: ESM-2 Hook -> SafeTensors Shard -> Zero-Copy Read."""
+
 from pathlib import Path
+
 import pytest
 import torch
 
 from ptm_sae.config import PipelineConfig
 from ptm_sae.data import parse_uniprot_fasta
 from ptm_sae.extraction.extractor import EsmExtractor
-from ptm_sae.extraction.sharder import SafeTensorsSharder
+from ptm_sae.extraction.pipeline import run_extraction_pipeline
 from ptm_sae.extraction.reader import SafeTensorsReader
+from ptm_sae.extraction.sharder import SafeTensorsSharder
 
 
 def test_esm_extraction_and_sharded_read_smoke(tmp_path):
@@ -37,7 +40,9 @@ def test_esm_extraction_and_sharded_read_smoke(tmp_path):
     extractor = EsmExtractor(cfg.model, cfg.extraction)
     sharder = SafeTensorsSharder(cfg.sharding)
 
-    assert extractor.hidden_dim == 320, f"ESM2-8M hidden dim should be 320, got {extractor.hidden_dim}"
+    assert extractor.hidden_dim == 320, (
+        f"ESM2-8M hidden dim should be 320, got {extractor.hidden_dim}"
+    )
 
     # 4. Extract in batches of 2
     batch_size = cfg.extraction.batch_size
@@ -94,3 +99,21 @@ def test_esm_extraction_and_sharded_read_smoke(tmp_path):
     resuming_sharder = SafeTensorsSharder(cfg.sharding)
     for u_id in expected_lengths:
         assert resuming_sharder.is_committed(u_id)
+
+
+def test_run_extraction_pipeline_end_to_end(tmp_path):
+    cfg = PipelineConfig.from_yaml("configs/dev_8m.yaml")
+    cfg.sharding.output_dir = str(tmp_path / "pipeline_cache")
+    cfg.sharding.max_shard_bytes = 300_000
+
+    # 1. First execution
+    manifest = run_extraction_pipeline(config=cfg, fasta_path="data/sample.fasta")
+    assert manifest["total_tokens"] == 685
+    assert len(manifest["entries"]) == 3
+
+    # 2. Re-execution verifies automatic resumption
+    second_manifest = run_extraction_pipeline(
+        config=cfg, fasta_path="data/sample.fasta"
+    )
+    assert second_manifest["total_tokens"] == 685
+    assert len(second_manifest["entries"]) == 3

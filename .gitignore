@@ -4,6 +4,14 @@ old/**/.venv/
 **/__pycache__/
 *.py[cod]
 
+# Secrets & Environment variables
+.env
+*.env
+.secrets*
+kaggle.json
+*.pem
+*.key
+
 # Testing & Cache
 .pytest_cache/
 .coverage

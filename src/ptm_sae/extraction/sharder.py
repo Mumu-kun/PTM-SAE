@@ -1,12 +1,16 @@
-"""SafeTensors sharded buffer manager and atomic manifest tracker."""
+"""SafeTensors sharded buffer manager with asynchronous background upload and thread safety."""
+
 import json
 import os
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional
+
 import safetensors.torch
 import torch
 
 from ptm_sae.config import ShardingConfig
+from ptm_sae.extraction.hub import HfSyncClient
 
 
 class SafeTensorsSharder:
@@ -18,13 +22,39 @@ class SafeTensorsSharder:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_path = self.output_dir / "manifest.json"
 
-        self.manifest: Dict = {
+        # Thread safety lock for multi-GPU worker ingestion
+        self._lock = threading.Lock()
+
+        # Initialize remote sync client and async upload pool if repository is configured
+        self.hub: HfSyncClient | None = (
+            HfSyncClient() if sharding_cfg.remote_repo_id else None
+        )
+        self._upload_pool: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="hf_upload")
+            if sharding_cfg.remote_repo_id
+            else None
+        )
+        self._pending_uploads: list[Future] = []
+
+        self.manifest: dict = {
             "version": "1.0",
             "total_tokens": 0,
             "shards": [],
             "entries": {},
         }
         self.committed_ids = set()
+
+        # Resumption: sync remote manifest if local manifest is missing
+        if (
+            self.cfg.resume
+            and not self.manifest_path.exists()
+            and self.hub
+            and self.cfg.remote_repo_id
+        ):
+            sub = (
+                self.cfg.remote_subpath.rstrip("/") if self.cfg.remote_subpath else None
+            )
+            self.hub.fetch_manifest(self.cfg.remote_repo_id, sub, self.manifest_path)
 
         if self.cfg.resume and self.manifest_path.exists():
             self._load_manifest()
@@ -33,20 +63,20 @@ class SafeTensorsSharder:
         self.current_shard_idx = len(self.manifest["shards"])
 
         # Active shard buffer
-        self._buffer_tensors: List[torch.Tensor] = []
-        self._buffer_entries: List[Dict] = []
+        self._buffer_tensors: list[torch.Tensor] = []
+        self._buffer_entries: list[dict] = []
         self._buffer_bytes: int = 0
         self._buffer_tokens: int = 0
 
         # Auxiliary mean-pooled sequence storage
-        self._mean_pooled_vectors: Dict[str, torch.Tensor] = {}
+        self._mean_pooled_vectors: dict[str, torch.Tensor] = {}
 
     def _load_manifest(self):
         try:
-            with open(self.manifest_path, "r", encoding="utf-8") as f:
+            with open(self.manifest_path, encoding="utf-8") as f:
                 self.manifest = json.load(f)
             self.committed_ids = set(self.manifest.get("entries", {}).keys())
-        except Exception:
+        except (json.JSONDecodeError, OSError, KeyError):
             # Re-initialize cleanly if file is empty or unparseable
             self.manifest = {
                 "version": "1.0",
@@ -57,7 +87,8 @@ class SafeTensorsSharder:
             self.committed_ids = set()
 
     def is_committed(self, uniprot_id: str) -> bool:
-        return uniprot_id in self.committed_ids
+        with self._lock:
+            return uniprot_id in self.committed_ids
 
     def add_protein(
         self,
@@ -65,34 +96,44 @@ class SafeTensorsSharder:
         residue_tensor: torch.Tensor,
         mean_pooled_vector: torch.Tensor,
     ):
-        """Add a protein activation tensor and its mean-pooled context to the shard buffer."""
-        if self.is_committed(uniprot_id):
-            return
+        """Add a protein activation tensor and its mean-pooled context to the shard buffer (thread-safe)."""
+        with self._lock:
+            if uniprot_id in self.committed_ids:
+                return
 
-        seq_len = residue_tensor.shape[0]
-        tensor_bytes = residue_tensor.nelement() * residue_tensor.element_size()
+            seq_len = residue_tensor.shape[0]
+            tensor_bytes = residue_tensor.nelement() * residue_tensor.element_size()
 
-        # Flush buffer before adding if adding would exceed max shard byte limit
-        if self._buffer_tensors and (self._buffer_bytes + tensor_bytes) > self.cfg.max_shard_bytes:
-            self.flush()
+            # Flush buffer before adding if adding would exceed max shard byte limit
+            if (
+                self._buffer_tensors
+                and (self._buffer_bytes + tensor_bytes) > self.cfg.max_shard_bytes
+            ):
+                self._flush_internal()
 
-        start_offset = self._buffer_tokens
-        end_offset = start_offset + seq_len
+            start_offset = self._buffer_tokens
+            end_offset = start_offset + seq_len
 
-        self._buffer_tensors.append(residue_tensor)
-        self._buffer_entries.append({
-            "uniprot_id": uniprot_id,
-            "length": seq_len,
-            "start_offset": start_offset,
-            "end_offset": end_offset,
-        })
-        self._buffer_bytes += tensor_bytes
-        self._buffer_tokens += seq_len
+            self._buffer_tensors.append(residue_tensor)
+            self._buffer_entries.append(
+                {
+                    "uniprot_id": uniprot_id,
+                    "length": seq_len,
+                    "start_offset": start_offset,
+                    "end_offset": end_offset,
+                }
+            )
+            self._buffer_bytes += tensor_bytes
+            self._buffer_tokens += seq_len
 
-        self._mean_pooled_vectors[uniprot_id] = mean_pooled_vector
+            self._mean_pooled_vectors[uniprot_id] = mean_pooled_vector
 
     def flush(self):
-        """Commit the current buffer to a SafeTensors shard and update manifest."""
+        """Commit the current buffer to a SafeTensors shard and update manifest (thread-safe)."""
+        with self._lock:
+            self._flush_internal()
+
+    def _flush_internal(self):
         if not self._buffer_tensors:
             return
 
@@ -121,10 +162,14 @@ class SafeTensorsSharder:
         self.manifest["total_tokens"] += self._buffer_tokens
 
         # 3. Append auxiliary mean-pooled vectors to separate single file
+        mean_path = self.output_dir / "mean_pooled_embeddings.safetensors"
         if self._mean_pooled_vectors:
-            mean_path = self.output_dir / "mean_pooled_embeddings.safetensors"
-            mean_dict = {k: v.contiguous() for k, v in self._mean_pooled_vectors.items()}
-            existing = safetensors.torch.load_file(mean_path) if mean_path.exists() else {}
+            mean_dict = {
+                k: v.contiguous() for k, v in self._mean_pooled_vectors.items()
+            }
+            existing = (
+                safetensors.torch.load_file(mean_path) if mean_path.exists() else {}
+            )
             existing.update(mean_dict)
             safetensors.torch.save_file(existing, mean_path)
             self._mean_pooled_vectors.clear()
@@ -135,6 +180,27 @@ class SafeTensorsSharder:
             json.dump(self.manifest, f, indent=2)
         os.replace(temp_manifest, self.manifest_path)
 
+        # 5. Asynchronous background upload to remote authority (non-blocking)
+        if self.hub and self.cfg.remote_repo_id:
+            hub_client = self.hub
+            remote_repo = self.cfg.remote_repo_id
+            sub = self.cfg.remote_subpath.rstrip("/") if self.cfg.remote_subpath else ""
+            shards_subpath = f"{sub}/shards" if sub else "shards"
+
+            def _async_upload(
+                s_path=shard_path, m_path=mean_path, man_path=self.manifest_path
+            ):
+                hub_client.upload_shard(remote_repo, shards_subpath, s_path)
+                if m_path.exists():
+                    hub_client.upload_shard(remote_repo, sub or None, m_path)
+                hub_client.upload_manifest(remote_repo, sub or None, man_path)
+
+            if self._upload_pool:
+                fut = self._upload_pool.submit(_async_upload)
+                self._pending_uploads.append(fut)
+            else:
+                _async_upload()
+
         self.current_shard_idx += 1
         self._buffer_tensors = []
         self._buffer_entries = []
@@ -142,5 +208,13 @@ class SafeTensorsSharder:
         self._buffer_tokens = 0
 
     def close(self):
-        """Ensure all remaining buffered activations are flushed."""
+        """Ensure all remaining buffered activations are flushed and background uploads finish."""
         self.flush()
+
+        # Wait for all background upload tasks to complete
+        for fut in self._pending_uploads:
+            fut.result()
+
+        if self._upload_pool:
+            self._upload_pool.shutdown(wait=True)
+            self._upload_pool = None

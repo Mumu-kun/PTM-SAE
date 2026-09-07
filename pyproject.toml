@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
+    "ruff>=0.16.6",
 ]
 
 [build-system]
@@ -30,3 +31,47 @@ packages = ["src/ptm_sae"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.6",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["src", "tests"]
+extend-exclude = [
+    "old",
+    "cache",
+    "data",
+    "proposal",
+    "docs",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "RUF",    # Ruff-specific rules
+    "BLE",    # blind exception catch
+    "S",      # flake8-bandit
+    "FURB",   # refurb
+]
+ignore = [
+    "E501",   # line length violations (delegated to ruff format)
+    "S101",   # asserts allowed
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S106"]
+"notebooks/*" = ["E402", "F811", "B018", "BLE001", "S110", "T201"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
