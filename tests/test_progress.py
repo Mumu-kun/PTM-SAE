@@ -7,9 +7,19 @@ import torch
 
 from ptm_sae.config import PipelineConfig, ShardingConfig
 from ptm_sae.extraction.pipeline import run_extraction_pipeline
-from ptm_sae.extraction.progress import PipelineProgressManager
+from ptm_sae.extraction.progress import PipelineProgressManager, PreformattedCard
 from ptm_sae.extraction.sharder import SafeTensorsSharder
 from ptm_sae.pipeline import run_full_lifecycle
+
+
+def test_preformatted_card_rendering():
+    card = PreformattedCard("┌─ PTM-SAE ─┐\n│ line 1    │\n└───────────┘")
+    assert "<pre style=" in card._repr_html_()
+    assert "┌─ PTM-SAE ─┐" in card._repr_html_()
+    assert "line 1" in card
+    assert str(card) == "┌─ PTM-SAE ─┐\n│ line 1    │\n└───────────┘"
+    assert repr(card) == "┌─ PTM-SAE ─┐\n│ line 1    │\n└───────────┘"
+    assert card == "┌─ PTM-SAE ─┐\n│ line 1    │\n└───────────┘"
 
 
 def test_progress_manager_interactive_rendering():

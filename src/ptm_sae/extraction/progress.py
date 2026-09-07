@@ -1,5 +1,6 @@
 """Unified multi-stage progress tracking, telemetry, and output virtualization for PTM-SAE."""
 
+import html
 import sys
 import threading
 import time
@@ -18,6 +19,43 @@ def _detect_ipython() -> bool:
         return shell is not None and "IPKernelApp" in shell.config
     except Exception:  # noqa: BLE001
         return False
+
+
+class PreformattedCard:
+    """Rich display object that renders cleanly in Jupyter/Kaggle notebooks and consoles.
+
+    Implements Jupyter's rich display protocol (_repr_html_ and _repr_pretty_)
+    to guarantee preformatted HTML rendering without raw string escaping or quotation marks.
+    """
+
+    def __init__(self, text: str):
+        self.text = text
+
+    def _repr_html_(self) -> str:
+        escaped = html.escape(self.text)
+        return (
+            "<pre style='"
+            "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; "
+            "font-size: 13px; line-height: 1.35; padding: 10px 14px; margin: 6px 0; "
+            "background-color: rgba(128, 128, 128, 0.07); border: 1px solid rgba(128, 128, 128, 0.2); "
+            "border-radius: 6px; overflow-x: auto; color: inherit; display: block;"
+            f"'>{escaped}</pre>"
+        )
+
+    def _repr_pretty_(self, p, cycle) -> None:
+        p.text(self.text)
+
+    def __contains__(self, item: str) -> bool:
+        return item in self.text
+
+    def __str__(self) -> str:
+        return self.text
+
+    def __repr__(self) -> str:
+        return self.text
+
+    def __eq__(self, other: object) -> bool:
+        return self.text == str(other)
 
 
 class PipelineProgressManager:
@@ -307,14 +345,16 @@ class PipelineProgressManager:
         if not self.enabled or not self._display_fn:
             return
 
-        card = self._generate_dashboard_card()
+        card_text = self._generate_dashboard_card()
+        rich_card = PreformattedCard(card_text)
+
         if self._display_handle is None:
             try:
-                self._display_handle = self._display_fn(card, display_id=True)
+                self._display_handle = self._display_fn(rich_card, display_id=True)
             except (TypeError, Exception):  # noqa: BLE001
-                self._display_fn(card)
+                self._display_fn(rich_card)
         else:
             try:
-                self._display_handle.update(card)
+                self._display_handle.update(rich_card)
             except Exception:  # noqa: BLE001
-                self._display_fn(card)
+                self._display_fn(rich_card)
