@@ -1,44 +1,56 @@
-"""Unified end-to-end lifecycle pipeline: Download -> Harmonize & Partition -> Extract -> Upload -> Verify."""
+"""Complete end-to-end PTM-SAE lifecycle pipeline orchestrator.
+
+Coordinates:
+1. Data Acquisition (fetch UniProt proteome & raw PTM datasets).
+2. Preparation & Splitting (homology partitioning & invariant validation).
+3. PLM Extraction (batched residue-level extraction & SafeTensors sharded buffering).
+4. Remote Synchronization (resilient Hugging Face Hub atomic commits).
+5. Verification (zero-copy readback sanity checks).
+"""
 
 import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
 from ptm_sae.config import PipelineConfig
-from ptm_sae.data import PTMCorpus, prepare_ptm_corpus
-from ptm_sae.data.fetcher import (
+from ptm_sae.data import (
+    PTMCorpus,
     fetch_cplm_human,
     fetch_uniprot_human_proteome,
     fetch_uniprot_ptm_features,
+    prepare_ptm_corpus,
 )
 from ptm_sae.extraction.hub import HfSyncClient, resolve_hf_token
 from ptm_sae.extraction.pipeline import run_extraction_pipeline
+from ptm_sae.extraction.progress import PipelineProgressManager
 from ptm_sae.extraction.reader import SafeTensorsReader
 
 
 def run_full_lifecycle(
     config: PipelineConfig,
     fasta_path: str | Path | None = None,
-    ptm_sources: Sequence[str | Path] | None = None,
-    processed_dir: str | Path = "data/processed",
+    ptm_sources: Sequence[Path] | None = None,
     sample_only: bool = False,
     max_proteins: int | None = None,
     remote_repo_id: str | None = None,
     remote_subpath: str | None = None,
     token: str | None = None,
+    progress_manager: PipelineProgressManager | None = None,
 ) -> dict:
-    """
-    Executes the entire data acquisition, extraction, and remote synchronization lifecycle:
-    1. Download: Streams reviewed human proteome from UniProt REST API if no FASTA is given.
-    2. Harmonization & Splitting: Validates biological invariants and partitions via exact MILP.
-    3. Activation Extraction: Extracts residue-level tensors with automatic CUDA OOM fallback.
+    """Executes the entire data acquisition, extraction, and remote synchronization lifecycle:
+
+    1. Data Acquisition: Downloads reviewed human proteome and raw PTM annotations.
+    2. Harmonization & Partitioning: Parses sequences, clusters homology groups, and solves MILP split.
+    3. ESM-2 Activation Extraction: Batched extraction across single/multi-GPU into SafeTensors shards.
     4. Remote Upload: Pushes shards, auxiliary context, and manifests to structured HF Hub subpaths.
-    5. Zero-Copy Readback Verification: Performs sanity verification on output SafeTensors.
+    5. Readback Verification: Validates zero-copy indexing and biological coordinate invariants.
     """
-    processed_path = Path(processed_dir)
+    pm = progress_manager or PipelineProgressManager()
+    pm.start_pipeline()
+
+    processed_path = Path("data/processed")
     processed_path.mkdir(parents=True, exist_ok=True)
 
-    # 1. Resolve structured remote paths
     resolved_repo = remote_repo_id or config.sharding.remote_repo_id
     resolved_subpath = remote_subpath or config.resolve_remote_subpath()
 
@@ -46,39 +58,31 @@ def run_full_lifecycle(
     config.sharding.remote_subpath = resolved_subpath
 
     # 1. Data acquisition and FASTA resolution
-    print("\n[Stage 1] Data Acquisition & FASTA Resolution")
+    pm.start_stage(1, total_items=1, info="Resolving proteome & PTM sources")
 
     if sample_only:
         resolved_fasta = Path("data/sample.fasta")
-        print(f"[Stage 1] Using sample FASTA: {resolved_fasta}")
     elif fasta_path:
         resolved_fasta = Path(fasta_path)
-        print(f"[Stage 1] Using provided FASTA: {resolved_fasta}")
     else:
-        print(
-            "[Stage 1] No FASTA provided: streaming reviewed canonical human proteome from UniProt..."
-        )
         resolved_fasta = fetch_uniprot_human_proteome(out_dir="data/raw")
-        print(f"[Stage 1] UniProt human proteome cached at: {resolved_fasta}")
 
     if not resolved_fasta.exists():
         raise FileNotFoundError(f"FASTA file not found at {resolved_fasta}")
 
-    # Resolve PTM sources: user provided or automatic Tier 1 acquisition (UniProt + CPLM)
     resolved_ptm_sources = list(ptm_sources) if ptm_sources else []
     if not resolved_ptm_sources and not sample_only:
-        print(
-            "[Stage 1] No PTM source provided: acquiring Tier 1 datasets (UniProt features + CPLM 4.0)..."
-        )
         uniprot_ptm = fetch_uniprot_ptm_features(output_dir="data/raw")
         cplm_ptm = fetch_cplm_human(output_dir="data/raw")
         resolved_ptm_sources = [uniprot_ptm, cplm_ptm]
-        print(
-            f"[Stage 1] Tier 1 PTM sources ready: {uniprot_ptm.name}, {cplm_ptm.name}"
-        )
+
+    pm.finish_stage(
+        1,
+        summary=f"Proteome: {resolved_fasta.name} | PTM datasets: {len(resolved_ptm_sources)} sources",
+    )
 
     # 2. Harmonization, invariant validation and exact MILP partitioning
-    print("\n[Stage 2] Harmonization, Invariant Validation & Exact MILP Partitioning")
+    pm.start_stage(2, total_items=1, info="Harmonization & exact MILP partitioning")
 
     corpus: PTMCorpus = prepare_ptm_corpus(
         fasta_path=resolved_fasta,
@@ -87,67 +91,66 @@ def run_full_lifecycle(
         max_seq_length=config.extraction.max_sequence_length,
         output_dir=processed_path,
     )
-    print(
-        f"[Stage 2] Corpus assembled: {corpus.total_proteins} proteins ({len(corpus.discovery_proteins)} discovery, {len(corpus.held_out_proteins)} held-out)."
-    )
-    print(
-        f"[Stage 2] Validated PTM sites: {corpus.total_sites} | Mismatches dropped: {len(corpus.audit_log)}"
+
+    pm.finish_stage(
+        2,
+        summary=f"{corpus.total_proteins} proteins ({len(corpus.discovery_proteins)} discovery, {len(corpus.held_out_proteins)} held-out) | {corpus.total_sites} valid sites",
     )
 
     # 3. ESM-2 activation extraction and sharded buffering
-    print("\n[Stage 3] ESM-2 Activation Extraction & Sharded Buffering")
-
-    # In production, extract the discovery partition; in sample mode, extract all
     target_proteins = corpus.all_proteins if sample_only else corpus.discovery_proteins
     if max_proteins is not None:
         target_proteins = target_proteins[:max_proteins]
-        print(
-            f"[Stage 3] Capped extraction set to first {max_proteins} proteins (--max-proteins)."
-        )
-    else:
-        print(f"[Stage 3] Target extraction set: {len(target_proteins)} proteins.")
 
     sharding_manifest = run_extraction_pipeline(
         config=config,
         proteins=target_proteins,
+        progress_manager=pm,
     )
 
     # 4. Structured remote hub synchronization and provenance upload
-    print("\n[Stage 4] Structured Remote Hub Synchronization & Provenance Upload")
-
     resolved_token = resolve_hf_token(token)
 
     if resolved_repo and resolved_token:
-        print(
-            f"[Stage 4] Synchronizing artifacts to Hugging Face Hub ({resolved_repo})..."
-        )
+        pm.start_stage(4, total_items=4, info=f"Pushing provenance to {resolved_repo}")
         hub = HfSyncClient(token=resolved_token)
 
-        # 4a. Upload corpus split provenance to dedicated 'corpus/' namespace
         corpus_subpath = "corpus"
-        for meta_file in (
+        meta_files = (
             processed_path / "split_manifest.json",
             processed_path / "proteins.jsonl",
             processed_path / "ptm_sites.jsonl",
             processed_path / "mismatch_audit.tsv",
-        ):
+        )
+        uploaded = 0
+        for meta_file in meta_files:
             if meta_file.exists():
-                hub.upload_shard(resolved_repo, corpus_subpath, meta_file)
-                print(f"[Stage 4] Uploaded to {corpus_subpath}/: {meta_file.name}")
+                res = hub.upload_shard(resolved_repo, corpus_subpath, meta_file)
+                if res is not None:
+                    uploaded += 1
+            pm.advance(1)
 
-        print(f"[Stage 4] Shards and embeddings committed under: {resolved_subpath}/")
-        print("[Stage 4] Remote storage synchronization complete.")
+        pm.finish_stage(
+            4,
+            summary=f"Provenance committed to {resolved_repo} ({uploaded} committed, {len(meta_files) - uploaded} skipped up-to-date)",
+        )
     elif resolved_repo and not resolved_token:
-        print(
-            f"[Stage 4] Warning: remote_repo_id ('{resolved_repo}') is set, but no HF_TOKEN was found. Remote upload skipped."
+        pm.start_stage(
+            4, total_items=1, info="Remote repo configured but token missing"
+        )
+        pm.finish_stage(
+            4,
+            summary=f"Warning: remote_repo_id ('{resolved_repo}') set, but no HF_TOKEN found. Skipped.",
         )
     else:
-        print(
-            "[Stage 4] Local Mode: remote_repo_id is not set. All shards and manifests retained in local cache."
+        pm.start_stage(4, total_items=1, info="Local cache retention mode")
+        pm.finish_stage(
+            4,
+            summary="Local Mode: remote_repo_id not set. All shards retained in local cache.",
         )
 
     # 5. Zero-copy readback sanity verification
-    print("\n[Stage 5] Zero-Copy Readback Sanity Verification")
+    pm.start_stage(5, total_items=1, info="Zero-copy readback sanity check")
 
     reader = SafeTensorsReader(
         cache_dir=config.sharding.output_dir,
@@ -156,23 +159,24 @@ def run_full_lifecycle(
         token=resolved_token,
     )
     available_proteins = reader.list_proteins()
-    print(
-        f"[Stage 5] Reader verified: {len(available_proteins)} proteins indexed in SafeTensors manifest."
-    )
-
+    probe_summary = "No proteins available"
     if available_proteins:
         probe_id = available_proteins[0]
         acts = reader.get_protein_activations(probe_id)
-        res_1 = reader.get_residue_activation(probe_id, 1)
+        _res_1 = reader.get_residue_activation(probe_id, 1)
         mean_vec = reader.get_mean_pooled_embedding(probe_id)
-        print(f"[Stage 5] Probe protein '{probe_id}':")
-        print(f"         - Residue activations tensor: shape {acts.shape}")
-        print(f"         - Biological residue 1 vector: shape {res_1.shape}")
-        print(f"         - Global mean-pooled embedding: shape {mean_vec.shape}")
+        probe_summary = (
+            f"Probe '{probe_id}' verified: acts {acts.shape}, mean {mean_vec.shape}"
+        )
 
-    print("\n" + "=" * 70)
-    print("LIFECYCLE PIPELINE COMPLETED SUCCESSFULLY!")
-    print("=" * 70)
+    pm.finish_stage(
+        5,
+        summary=f"{len(available_proteins)} proteins indexed in SafeTensors manifest | {probe_summary}",
+    )
+
+    pm.print("\n" + "═" * 72)
+    pm.print("  PTM-SAE LIFECYCLE COMPLETED SUCCESSFULLY")
+    pm.print("═" * 72)
 
     return {
         "corpus_manifest": corpus.manifest,

@@ -36,3 +36,4 @@ build/
 # Legacy archive
 old/
 scratch/
+.scratch/

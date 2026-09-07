@@ -1,4 +1,4 @@
-"""End-to-end activation extraction pipeline runner with multi-GPU parallelization, cloud resumption and OOM fallback."""
+"""End-to-end ESM-2 activation extraction pipeline with batching, OOM recovery, and multi-GPU dispatch."""
 
 import argparse
 import queue
@@ -7,13 +7,13 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import torch
-from tqdm import tqdm
 
 from ptm_sae.config import PipelineConfig
 from ptm_sae.data import parse_uniprot_fasta
 from ptm_sae.data.fetcher import fetch_uniprot_human_proteome
 from ptm_sae.data.schema import Protein
 from ptm_sae.extraction.extractor import EsmExtractor
+from ptm_sae.extraction.progress import PipelineProgressManager
 from ptm_sae.extraction.sharder import SafeTensorsSharder
 
 
@@ -22,15 +22,18 @@ def run_extraction_pipeline(
     fasta_path: str | Path | None = None,
     proteins: Sequence[Protein] | None = None,
     max_proteins: int | None = None,
+    progress_manager: PipelineProgressManager | None = None,
 ) -> dict:
-    """
-    Executes end-to-end ESM-2 activation extraction:
+    """Executes end-to-end ESM-2 activation extraction:
+
     1. Loads candidate FASTA proteins.
     2. Initializes SafeTensors sharder and skips already committed proteins.
     3. Resolves compute devices (single-GPU or multi-GPU pool across all visible GPUs).
     4. Runs batched PLM extraction with automated CUDA OOM fallback.
     5. Commits remaining buffers and syncs manifest to local cache and remote hub asynchronously.
     """
+    pm = progress_manager or PipelineProgressManager()
+
     # 1. Resolve candidate protein sequences
     if proteins is None:
         if fasta_path is None:
@@ -40,12 +43,9 @@ def run_extraction_pipeline(
         if not target_fasta.exists():
             raise FileNotFoundError(f"FASTA file not found at {target_fasta}")
 
-        valid_proteins, skipped = parse_uniprot_fasta(
+        valid_proteins, _skipped = parse_uniprot_fasta(
             target_fasta,
             max_sequence_length=config.extraction.max_sequence_length,
-        )
-        print(
-            f"[Pipeline] Parsed {len(valid_proteins)} valid proteins (skipped {len(skipped)} exceeding length limit)."
         )
     else:
         valid_proteins = list(proteins)
@@ -54,19 +54,27 @@ def run_extraction_pipeline(
         valid_proteins = valid_proteins[:max_proteins]
 
     # 2. Initialize SafeTensors Sharded Buffer Manager
-    print(
-        f"[Pipeline] Initializing SafeTensors Sharder (output: {config.sharding.output_dir})..."
-    )
-    sharder = SafeTensorsSharder(config.sharding)
+    def _on_shard_flush(idx: int, _name: str) -> None:
+        pm.set_active_shard(idx)
+
+    sharder = SafeTensorsSharder(config.sharding, on_shard_flush=_on_shard_flush)
+    if sharder.manifest["shards"]:
+        pm.set_active_shard(len(sharder.manifest["shards"]) - 1)
 
     # 3. Filter out proteins already committed in existing manifest
     uncommitted = [p for p in valid_proteins if not sharder.is_committed(p.uniprot_id)]
-    print(
-        f"[Pipeline] Total proteins: {len(valid_proteins)} | Already committed: {len(valid_proteins) - len(uncommitted)} | Remaining: {len(uncommitted)}"
-    )
+    batch_size = config.extraction.batch_size
 
     if not uncommitted:
-        print("[Pipeline] All proteins are already committed. Extraction is complete.")
+        pm.start_stage(
+            3,
+            total_items=0,
+            info=f"All {len(valid_proteins)} proteins already committed",
+        )
+        pm.finish_stage(
+            3,
+            summary=f"All {len(valid_proteins)} proteins already committed ({sharder.manifest['total_tokens']:,} tokens across {len(sharder.manifest['shards'])} shards)",
+        )
         return sharder.manifest
 
     # 4. Resolve compute devices for single-GPU or multi-GPU execution
@@ -88,13 +96,15 @@ def run_extraction_pipeline(
     else:
         devices = [torch.device("cpu")]
 
-    batch_size = config.extraction.batch_size
-    pbar = tqdm(total=len(uncommitted), desc="Extracting activations", unit="protein")
+    pm.start_stage(
+        3,
+        total_items=len(uncommitted),
+        info=f"batch_size={batch_size}, devices={len(devices)}",
+    )
 
     # 5a. Single-Device Execution Path
     if len(devices) == 1:
         single_dev = devices[0]
-        print(f"[Pipeline] Single-device mode: {single_dev} (batch_size={batch_size})")
         dev_cfg = config.model.model_copy()
         dev_cfg.device = str(single_dev)
         extractor = EsmExtractor(dev_cfg, config.extraction)
@@ -107,9 +117,6 @@ def run_extraction_pipeline(
                         out.uniprot_id, out.residue_tensor, out.mean_pooled_vector
                     )
             except torch.cuda.OutOfMemoryError:
-                print(
-                    f"\n[Warning] CUDA OOM on batch {i}. Recovering with batch_size=1..."
-                )
                 torch.cuda.empty_cache()
                 for single_protein in batch:
                     for out in extractor.extract_batch([single_protein]):
@@ -117,13 +124,10 @@ def run_extraction_pipeline(
                             out.uniprot_id, out.residue_tensor, out.mean_pooled_vector
                         )
 
-            pbar.update(len(batch))
+            pm.advance(len(batch))
 
     # 5b. Multi-GPU Parallel Execution Path
     else:
-        print(
-            f"[Pipeline] Multi-GPU mode: parallelizing across {len(devices)} GPUs ({', '.join(str(d) for d in devices)})"
-        )
         extractors: dict[str, EsmExtractor] = {}
         for dev in devices:
             dev_cfg = config.model.model_copy()
@@ -133,8 +137,6 @@ def run_extraction_pipeline(
         batch_queue: queue.Queue = queue.Queue()
         for i in range(0, len(uncommitted), batch_size):
             batch_queue.put(uncommitted[i : i + batch_size])
-
-        pbar_lock = threading.Lock()
 
         def _worker(dev_str: str):
             inst = extractors[dev_str]
@@ -159,8 +161,7 @@ def run_extraction_pipeline(
                                 out.mean_pooled_vector,
                             )
 
-                with pbar_lock:
-                    pbar.update(len(batch))
+                pm.advance(len(batch))
                 batch_queue.task_done()
 
         threads = [
@@ -172,12 +173,11 @@ def run_extraction_pipeline(
         for t in threads:
             t.join()
 
-    pbar.close()
-
     # 6. Flush remaining buffers and ensure background uploads finish
     sharder.close()
-    print(
-        f"[Pipeline] Extraction finalized. Total tokens in manifest: {sharder.manifest['total_tokens']:,}"
+    pm.finish_stage(
+        3,
+        summary=f"Extracted {len(uncommitted)} proteins ({sharder.manifest['total_tokens']:,} tokens across {len(sharder.manifest['shards'])} shards)",
     )
     return sharder.manifest
 

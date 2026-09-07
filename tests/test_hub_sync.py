@@ -1,6 +1,8 @@
 """Unit tests for Hugging Face Hub synchronization, token cascade, and resilient shard hydration."""
 
+import io
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,6 +12,9 @@ import torch
 from ptm_sae.config import ShardingConfig
 from ptm_sae.extraction.hub import (
     HfSyncClient,
+    SuppressEmptyCommitFilter,
+    compute_sha256,
+    configure_hub_logging,
     resolve_hf_token,
     retry_with_backoff,
 )
@@ -57,6 +62,80 @@ def test_retry_with_backoff_success_and_failure():
         )
 
 
+def test_suppress_empty_commit_filter():
+    filt = SuppressEmptyCommitFilter()
+    test_logger = logging.getLogger("test_hf_filter_logger")
+    test_logger.setLevel(logging.DEBUG)
+    test_logger.addFilter(filt)
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    test_logger.addHandler(handler)
+
+    try:
+        # Benign empty commit warning should be dropped
+        test_logger.warning(
+            "No files have been modified since last commit. Skipping to prevent empty commit."
+        )
+        assert "No files have been modified" not in stream.getvalue()
+
+        # Legitimate warning should pass through
+        test_logger.warning("Authentication token expiring soon")
+        assert "Authentication token expiring soon" in stream.getvalue()
+
+        # Legitimate error should pass through
+        test_logger.error("Failed to connect to Hugging Face Hub")
+        assert "Failed to connect to Hugging Face Hub" in stream.getvalue()
+    finally:
+        test_logger.removeHandler(handler)
+        test_logger.removeFilter(filt)
+
+
+def test_configure_hub_logging():
+    configure_hub_logging()
+    for name in ("huggingface_hub", "huggingface_hub.hf_api", "huggingface_hub.utils"):
+        target_logger = logging.getLogger(name)
+        assert any(
+            isinstance(f, SuppressEmptyCommitFilter) for f in target_logger.filters
+        )
+
+
+def test_compute_sha256(tmp_path):
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_text("ptm-sae-test-hash", encoding="utf-8")
+    hash_val = compute_sha256(sample_file)
+    assert isinstance(hash_val, str)
+    assert len(hash_val) == 64
+
+
+def test_pre_upload_sha256_skip_and_commit(tmp_path):
+    client = HfSyncClient(token="mock_token")
+    shard_file = tmp_path / "shard_0000.safetensors"
+    safetensors.torch.save_file({"acts": torch.zeros(10, 8)}, shard_file)
+    local_sha = compute_sha256(shard_file)
+    assert len(local_sha) == 64
+
+    client.api = MagicMock()
+
+    # 1. First upload: remote file does not exist or has different hash -> upload proceeds
+    mock_lfs = MagicMock()
+    mock_lfs.sha256 = "different_remote_sha"
+    mock_path_info = MagicMock()
+    mock_path_info.lfs = mock_lfs
+    client.api.get_paths_info.return_value = [mock_path_info]
+    client.api.upload_file.return_value = "https://huggingface.co/commit/123"
+
+    res = client.upload_shard("test/repo", "layer_4", shard_file, check_hash=True)
+    assert res == "https://huggingface.co/commit/123"
+    assert client.api.upload_file.call_count == 1
+
+    # 2. Second upload: known in cache with matching SHA-256 -> skipped immediately without network call
+    client.api.upload_file.reset_mock()
+    res2 = client.upload_shard("test/repo", "layer_4", shard_file, check_hash=True)
+    assert res2 is None
+    assert client.api.upload_file.call_count == 0
+
+
 def test_hf_sync_client_path_normalization():
     assert (
         HfSyncClient.build_repo_path("esm2_650m/layer_24", "manifest.json")
@@ -90,7 +169,7 @@ def test_hf_sync_hydrate_atomic_write_and_size_guard(tmp_path):
         assert hydrated.stat().st_size == real_size
 
         # Mismatched byte size raises error and removes corrupt target
-        with pytest.raises(IOError, match="Corrupt shard download"):
+        with pytest.raises(OSError, match="Corrupt shard download"):
             client.hydrate_shard(
                 repo_id="mock/repo",
                 subpath="layer_4",

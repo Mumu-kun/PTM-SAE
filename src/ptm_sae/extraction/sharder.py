@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
@@ -15,13 +16,18 @@ from ptm_sae.extraction.hub import HfSyncClient
 
 
 class SafeTensorsSharder:
-    """Buffers residue activations and writes sharded SafeTensors with atomic manifest commits."""
+    """Manages SafeTensors shard buffers, manifest state, and non-blocking remote synchronization."""
 
-    def __init__(self, sharding_cfg: ShardingConfig):
+    def __init__(
+        self,
+        sharding_cfg: ShardingConfig,
+        on_shard_flush: Callable[[int, str], None] | None = None,
+    ):
         self.cfg = sharding_cfg
         self.output_dir = Path(sharding_cfg.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_path = self.output_dir / "manifest.json"
+        self.on_shard_flush = on_shard_flush
 
         # Thread safety lock for multi-GPU worker ingestion
         self._lock = threading.Lock()
@@ -79,6 +85,18 @@ class SafeTensorsSharder:
 
         # Auxiliary mean-pooled sequence storage
         self._mean_pooled_vectors: dict[str, torch.Tensor] = {}
+
+    @property
+    def buffer_bytes(self) -> int:
+        return self._buffer_bytes
+
+    @property
+    def buffer_tokens(self) -> int:
+        return self._buffer_tokens
+
+    @property
+    def shard_count(self) -> int:
+        return len(self.manifest.get("shards", []))
 
     def _load_manifest(self):
         try:
@@ -209,6 +227,11 @@ class SafeTensorsSharder:
                 self._pending_uploads.append(fut)
             else:
                 _async_upload()
+
+        # Trigger on_shard_flush hook if registered
+        if self.on_shard_flush:
+            with contextlib.suppress(Exception):
+                self.on_shard_flush(self.current_shard_idx, shard_filename)
 
         self.current_shard_idx += 1
         self._buffer_tensors = []
