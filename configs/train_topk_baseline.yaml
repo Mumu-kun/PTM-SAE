@@ -1,0 +1,35 @@
+# TopK SAE baseline — ESM-2 650M, Layer 24 (d_in=1280), discovery_train.
+# Recipe follows Gao et al., 2024 (OpenAI): plain Adam-family optimizer, constant LR, no grad
+# clipping at this scale, no sparsity loss term (k enforces sparsity structurally).
+
+sae_type: topk
+d_in: 1280
+d_hidden: 4096
+k: 32
+
+# total_steps has no safe default — pick it from your actual measured tokens/sec
+# (bench_sae_speed.py) once you know real GPU throughput. ~5.08M discovery_train tokens /
+# batch_size below ≈ ~1,240 steps/epoch; this value is a ~10-epoch starting point, not tuned.
+total_steps: 12000
+learning_rate: 0.0004
+batch_size: 4096
+dtype: fp32
+seed: 0
+
+dead_latent_window_tokens: 500000
+eval_interval_steps: 500
+checkpoint_dir: checkpoints/topk_k32_w4096
+save_all_checkpoints: false
+
+cache_dir: cache/activations/esm2_650m_l24
+remote_repo_id: mustafa-muhaimin/ptm-sae-dataset
+remote_subpath: activations/esm2_t33_650M_UR50D/layer_24
+corpus_dir: data/processed
+remote_corpus_subpath: corpus
+num_workers: 0
+shuffle_buffer_size: 65536
+
+wandb:
+  enabled: false
+  project: ptm-sae
+  run_name: topk_k32_w4096

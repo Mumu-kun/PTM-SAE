@@ -1,0 +1,183 @@
+"""Test suite for baseline TopK and JumpReLU SAE architectures (transformers.PreTrainedModel)."""
+
+import math
+
+import torch
+
+from ptm_sae.models import (
+    JumpReLUSAEConfig,
+    JumpReLUSAEModel,
+    TopKSAEConfig,
+    TopKSAEModel,
+)
+from ptm_sae.models.modeling_sae import _HeavisideSTE, _JumpReLUSTE
+
+
+def test_topk_sae_exact_sparsity_and_shapes():
+    """Verify TopKSAEModel enforces exactly k nonzero latents per row and reconstructs input shape."""
+    torch.manual_seed(0)
+    d_in, d_hidden, k, batch = 16, 64, 8, 32
+    sae = TopKSAEModel(TopKSAEConfig(d_in=d_in, d_hidden=d_hidden, k=k))
+
+    x = torch.randn(batch, d_in)
+    out = sae(x)
+
+    assert out.reconstruction.shape == (batch, d_in)
+    assert out.latents.shape == (batch, d_hidden)
+    assert torch.all(out.latents.gt(0).sum(dim=-1) <= k)
+    assert out.l0.item() <= k
+
+
+def test_topk_sae_rejects_invalid_k():
+    """k must be a positive integer not exceeding dictionary width."""
+    try:
+        TopKSAEModel(TopKSAEConfig(d_in=8, d_hidden=16, k=0))
+        raise AssertionError("expected ValueError for k=0")
+    except ValueError:
+        pass
+
+    try:
+        TopKSAEModel(TopKSAEConfig(d_in=8, d_hidden=16, k=32))
+        raise AssertionError("expected ValueError for k > d_hidden")
+    except ValueError:
+        pass
+
+
+def test_topk_sae_gradients_flow():
+    """Verify backward pass populates gradients on encoder/decoder/bias parameters."""
+    torch.manual_seed(1)
+    sae = TopKSAEModel(TopKSAEConfig(d_in=8, d_hidden=32, k=4))
+    x = torch.randn(16, 8)
+
+    out = sae(x)
+    out.mse_loss.backward()
+
+    assert sae.W_enc.grad is not None
+    assert sae.W_dec.grad is not None
+    assert sae.b_dec.grad is not None
+    assert sae.b_enc.grad is not None
+
+
+def test_decoder_normalization_and_gradient_projection():
+    """Verify unit-norm renormalization and parallel-gradient-component removal."""
+    torch.manual_seed(2)
+    sae = TopKSAEModel(TopKSAEConfig(d_in=8, d_hidden=16, k=4))
+
+    # Decoder starts unit-norm by construction; perturb and renormalize.
+    with torch.no_grad():
+        sae.W_dec.mul_(3.0)
+    sae.normalize_decoder_()
+    norms = sae.W_dec.norm(dim=-1)
+    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
+
+    x = torch.randn(8, 8)
+    out = sae(x)
+    out.mse_loss.backward()
+    sae.remove_decoder_gradient_parallel_component_()
+
+    parallel_component = (sae.W_dec.grad * sae.W_dec).sum(dim=-1)
+    assert torch.allclose(
+        parallel_component, torch.zeros_like(parallel_component), atol=1e-5
+    )
+
+
+def test_topk_sae_save_and_load_round_trip(tmp_path):
+    """Verify save_pretrained/from_pretrained preserves config and learned parameters exactly."""
+    torch.manual_seed(6)
+    sae = TopKSAEModel(TopKSAEConfig(d_in=8, d_hidden=16, k=4))
+    sae.save_pretrained(tmp_path)
+
+    reloaded = TopKSAEModel.from_pretrained(tmp_path)
+    assert reloaded.config.d_in == 8
+    assert reloaded.config.d_hidden == 16
+    assert reloaded.k == 4
+    assert torch.equal(reloaded.W_dec, sae.W_dec)
+    assert torch.equal(reloaded.W_enc, sae.W_enc)
+
+    x = torch.randn(4, 8)
+    torch.manual_seed(0)
+    original_out = sae(x)
+    torch.manual_seed(0)
+    reloaded_out = reloaded(x)
+    assert torch.equal(original_out.reconstruction, reloaded_out.reconstruction)
+
+
+def test_jumprelu_sae_forward_and_shapes():
+    """Verify JumpReLUSAEModel forward pass shapes and non-negative sparsity count."""
+    torch.manual_seed(3)
+    d_in, d_hidden, batch = 16, 64, 32
+    sae = JumpReLUSAEModel(JumpReLUSAEConfig(d_in=d_in, d_hidden=d_hidden))
+
+    x = torch.randn(batch, d_in)
+    out = sae(x)
+
+    assert out.reconstruction.shape == (batch, d_in)
+    assert out.latents.shape == (batch, d_hidden)
+    assert out.l0.item() >= 0.0
+
+
+def test_jumprelu_sae_threshold_gradient_flows():
+    """Verify the straight-through estimator routes gradient into log_threshold via both
+    the reconstruction loss and the L0 pseudo-count term."""
+    torch.manual_seed(4)
+    sae = JumpReLUSAEModel(
+        JumpReLUSAEConfig(d_in=8, d_hidden=32, bandwidth=1e-2, init_threshold=0.01)
+    )
+    x = torch.randn(64, 8)
+
+    out = sae(x)
+    total_loss = out.mse_loss + 1e-3 * out.l0
+    total_loss.backward()
+
+    assert sae.log_threshold.grad is not None
+    assert torch.any(sae.log_threshold.grad != 0)
+
+
+def test_jumprelu_sae_masks_below_threshold():
+    """Latents strictly below the learned threshold must be exactly zero."""
+    torch.manual_seed(5)
+    sae = JumpReLUSAEModel(JumpReLUSAEConfig(d_in=8, d_hidden=32, init_threshold=0.5))
+    x = torch.randn(64, 8) * 0.1  # small activations, mostly below threshold
+
+    with torch.no_grad():
+        pre_acts = sae.encode_pre_activation(x)
+        latents = sae.encode(x)
+        threshold = torch.exp(sae.log_threshold)
+
+    below = pre_acts <= threshold
+    assert torch.all(latents[below] == 0)
+
+
+def test_jumprelu_ste_threshold_gradient_matches_closed_form():
+    """Regression test for a scaling bug: log_threshold's gradient must include the log-space
+    chain-rule factor of theta (d(theta)/d(log theta) = theta) on top of the paper's raw-theta
+    pseudo-derivative (Rajamanoharan et al., 2024, Eq. 11/12) — not just the raw-theta formula
+    alone, which under-scaled the reconstruction-path gradient by 1/theta relative to the
+    correctly-scaled L0-path gradient.
+    """
+    bandwidth = 0.1
+    theta = 0.5
+
+    log_theta = torch.tensor([math.log(theta)], requires_grad=True)
+    pre_acts = torch.tensor([[theta]])  # sits exactly on the threshold: inside the kernel window
+    out = _JumpReLUSTE.apply(pre_acts, log_theta, bandwidth)
+    out.sum().backward()
+    expected_value_grad = -(theta**2 / bandwidth)  # -(theta/bandwidth)*kernel(=1) * theta
+    assert torch.allclose(log_theta.grad, torch.tensor([expected_value_grad]), atol=1e-6)
+
+    log_theta_l0 = torch.tensor([math.log(theta)], requires_grad=True)
+    active = _HeavisideSTE.apply(pre_acts, log_theta_l0, bandwidth)
+    active.sum().backward()
+    expected_l0_grad = -(theta / bandwidth)  # -(1/bandwidth)*kernel(=1) * theta
+    assert torch.allclose(log_theta_l0.grad, torch.tensor([expected_l0_grad]), atol=1e-6)
+
+
+def test_jumprelu_sae_save_and_load_round_trip(tmp_path):
+    """Verify save_pretrained/from_pretrained preserves the learned per-latent thresholds."""
+    torch.manual_seed(7)
+    sae = JumpReLUSAEModel(JumpReLUSAEConfig(d_in=8, d_hidden=16))
+    sae.save_pretrained(tmp_path)
+
+    reloaded = JumpReLUSAEModel.from_pretrained(tmp_path)
+    assert reloaded.config.bandwidth == sae.config.bandwidth
+    assert torch.equal(reloaded.log_threshold, sae.log_threshold)

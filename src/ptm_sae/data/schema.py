@@ -12,8 +12,8 @@ class Protein(BaseModel):
     sequence: str
     length: int
     cluster_id: str = ""
-    partition: Literal["discovery", "discovery_train", "discovery_val", "held_out"] = (
-        "discovery"
+    partition: Literal["discovery_train", "discovery_val", "held_out"] = (
+        "discovery_train"
     )
     has_annotated_ptm: bool = False
     stratum_counts: dict[str, int] = Field(default_factory=dict)
