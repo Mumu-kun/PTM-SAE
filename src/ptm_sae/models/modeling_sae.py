@@ -33,6 +33,21 @@ from ptm_sae.models.configuration_sae import (
 )
 
 
+def _geometric_median(
+    points: torch.Tensor, n_iters: int = 20, eps: float = 1e-6
+) -> torch.Tensor:
+    """Weiszfeld's algorithm: the point minimizing summed L2 distance to `points` (shape
+    (n, d)). Unlike the coordinate-wise mean, it is robust to outlier rows — each point's
+    pull on the next estimate is weighted by 1/distance, so far-away points get down-weighted
+    as the estimate converges toward the dense cluster."""
+    median = points.mean(dim=0)
+    for _ in range(n_iters):
+        distances = (points - median).norm(dim=-1).clamp_min(eps)
+        weights = 1.0 / distances
+        median = (weights.unsqueeze(-1) * points).sum(dim=0) / weights.sum()
+    return median
+
+
 def _nearest_power_of_two(x: int) -> int:
     """Nearest power of two to x — Gao et al. (2024)'s own heuristic for AuxK's k_aux
     (they use 512, a power of two close to GPT-2 small's d_model/2 = 384)."""
@@ -83,6 +98,14 @@ class SAEPreTrainedModel(PreTrainedModel):
         self, activations: torch.Tensor, reconstruction: torch.Tensor
     ) -> torch.Tensor:
         return (reconstruction - activations).pow(2).mean()
+
+    @torch.no_grad()
+    def initialize_bias_from_data(self, sample_batch: torch.Tensor) -> None:
+        """Seeds `b_dec` from the geometric median of `sample_batch` (shape (n_tokens, d_in)),
+        instead of leaving it at zero. Standard SAE practice (Anthropic's *Towards
+        Monosemanticity*; Gao et al., 2024) — call once, right after construction and before
+        the optimizer exists, on a throwaway sample of real activations."""
+        self.b_dec.copy_(_geometric_median(sample_batch.to(self.b_dec.device)))
 
     @torch.no_grad()
     def normalize_decoder_(self) -> None:

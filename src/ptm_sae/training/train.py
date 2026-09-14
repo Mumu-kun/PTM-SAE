@@ -301,6 +301,32 @@ def run_sae_training(
     else:
         model = _build_model(config).to(device)
 
+        # Seed b_dec from real activations (geometric median, robust to per-protein outlier
+        # norms) instead of leaving it at zero — must happen before AdamW is constructed below
+        # so there's no stale momentum for a parameter about to be overwritten. Drawn from a
+        # throwaway loader, not the real train_loader, so this doesn't quietly shrink epoch 0.
+        _, bias_init_loader = build_partition_dataloader(
+            "discovery_train",
+            batch_size=config.batch_size,
+            cache_dir=config.cache_dir,
+            remote_repo_id=config.remote_repo_id,
+            remote_subpath=config.remote_subpath,
+            corpus_dir=config.corpus_dir,
+            remote_corpus_subpath=config.remote_corpus_subpath,
+            max_cached_shards=config.max_cached_shards,
+            num_workers=0,
+            shuffle=True,
+            seed=config.seed,
+        )
+        bias_init_sample: list[torch.Tensor] = []
+        bias_init_tokens = 0
+        for batch in bias_init_loader:
+            bias_init_sample.append(batch)
+            bias_init_tokens += batch.shape[0]
+            if bias_init_tokens >= 50_000:
+                break
+        model.initialize_bias_from_data(torch.cat(bias_init_sample).to(device))
+
     wandb_run = None
     if config.wandb.enabled:
         import wandb

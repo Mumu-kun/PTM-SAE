@@ -15,6 +15,7 @@ from ptm_sae.models import (
     TopKSAEModel,
 )
 from ptm_sae.models.modeling_sae import (
+    _geometric_median,
     _HeavisideSTE,
     _JumpReLUSTE,
     _nearest_power_of_two,
@@ -189,6 +190,36 @@ def test_jumprelu_sae_save_and_load_round_trip(tmp_path):
     reloaded = JumpReLUSAEModel.from_pretrained(tmp_path)
     assert reloaded.config.bandwidth == sae.config.bandwidth
     assert torch.equal(reloaded.log_threshold, sae.log_threshold)
+
+
+def test_geometric_median_robust_to_outlier():
+    """A single far-away outlier should barely move the geometric median off the cluster
+    centroid, unlike the plain mean, which the outlier can drag arbitrarily far."""
+    torch.manual_seed(30)
+    cluster = torch.randn(99, 4) * 0.1
+    outlier = torch.tensor([[100.0, 100.0, 100.0, 100.0]])
+    points = torch.cat([cluster, outlier])
+
+    median = _geometric_median(points)
+    mean = points.mean(dim=0)
+    centroid = cluster.mean(dim=0)
+
+    assert (median - centroid).norm() < (mean - centroid).norm()
+    assert (median - centroid).norm() < 1.0
+
+
+def test_initialize_bias_from_data_seeds_b_dec():
+    """Verify initialize_bias_from_data moves b_dec off its zero default and close to the
+    sample batch's central tendency, rather than leaving it at the base class's zero-init."""
+    torch.manual_seed(31)
+    sae = TopKSAEModel(TopKSAEConfig(d_in=8, d_hidden=32, k=4))
+    assert torch.equal(sae.b_dec, torch.zeros(8))
+
+    sample = torch.randn(200, 8) * 5.0 + 3.0
+    sae.initialize_bias_from_data(sample)
+
+    assert not torch.equal(sae.b_dec, torch.zeros(8))
+    assert (sae.b_dec - sample.mean(dim=0)).norm() < sample.std(dim=0).norm()
 
 
 def test_nearest_power_of_two():
