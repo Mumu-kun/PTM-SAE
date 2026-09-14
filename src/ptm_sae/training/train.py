@@ -10,12 +10,14 @@ matching a run's own `checkpoint_dir`).
 """
 
 import argparse
+import os
 import time
 from pathlib import Path
 
 import torch
 from transformers import get_cosine_schedule_with_warmup
 
+from ptm_sae.extraction.hub import resolve_wandb_api_key
 from ptm_sae.extraction.progress import PipelineProgressManager
 from ptm_sae.models import (
     BatchTopKSAEConfig,
@@ -331,6 +333,11 @@ def run_sae_training(
     wandb_run = None
     if config.wandb.enabled:
         import wandb
+
+        # wandb.init() alone won't authenticate on a fresh Kaggle/Colab session — unlike
+        # HF_TOKEN, nothing else surfaces a WANDB_API_KEY secret into the environment.
+        if wandb_key := resolve_wandb_api_key():
+            os.environ.setdefault("WANDB_API_KEY", wandb_key)
 
         resumed_run_id = resume_state["wandb_run_id"] if resume_state is not None else None
         wandb_run = wandb.init(

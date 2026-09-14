@@ -95,6 +95,45 @@ def resolve_hf_token(token: str | None = None) -> str | None:
     return get_token()
 
 
+def resolve_wandb_api_key(token: str | None = None) -> str | None:
+    """Discovers a Weights & Biases API key across the same zero-knowledge cascade as
+    `resolve_hf_token`, minus the local-cache tier (wandb manages its own netrc-based login
+    independently, so returning None here just lets `wandb.init()` fall back to that):
+
+    1. Explicit function argument.
+    2. Environment variable (WANDB_API_KEY).
+    3. Google Colab Secrets (userdata.get('WANDB_API_KEY')).
+    4. Kaggle Secrets (UserSecretsClient().get_secret('WANDB_API_KEY')).
+    """
+    if token:
+        return token.strip()
+
+    if env_key := os.environ.get("WANDB_API_KEY"):
+        return env_key.strip()
+
+    if "google.colab" in sys.modules or Path("/content").exists():
+        try:
+            from google.colab import userdata  # type: ignore[import-not-found]
+
+            if colab_key := userdata.get("WANDB_API_KEY"):
+                return colab_key.strip()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    if "kaggle_secrets" in sys.modules or Path("/kaggle").exists():
+        try:
+            from kaggle_secrets import (
+                UserSecretsClient,  # type: ignore[import-not-found]
+            )
+
+            if kaggle_key := UserSecretsClient().get_secret("WANDB_API_KEY"):
+                return kaggle_key.strip()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    return None
+
+
 def retry_with_backoff(
     fn: Callable[[], T],
     max_retries: int = 3,
