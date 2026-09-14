@@ -13,6 +13,9 @@ class WandbConfig(BaseModel):
     enabled: bool = False
     project: str = "ptm-sae"
     run_name: str | None = None
+    # Lets runs be filtered later (wandb.Api().runs(project, filters={"tags": ...})) and is
+    # what scripts/cleanup_wandb_runs.py checks for a "shortlist" tag before deleting a run.
+    tags: list[str] = Field(default_factory=list)
 
 
 class SAETrainingConfig(BaseModel):
@@ -55,6 +58,11 @@ class SAETrainingConfig(BaseModel):
     eval_interval_steps: int = 500
     checkpoint_dir: str = "checkpoints/run"
     save_all_checkpoints: bool = False
+    # Path to a PREVIOUS run's checkpoint_dir root (its latest/ subfolder, weights + optimizer +
+    # step + wandb_run_id, is what actually gets read) to resume from. Deliberately distinct from
+    # this run's own checkpoint_dir: on Kaggle, a resumed run reads prior state from a read-only
+    # attached input dataset while writing fresh checkpoints to a new writable working directory.
+    resume_from: str | None = None
 
     # Lightweight interpretability diagnostics. Tier 2 (density histogram, cosine similarity,
     # alive-latent stability) is pure tensor math on the existing eval pass and always runs.

@@ -22,6 +22,11 @@ eval_interval_steps: 2000
 checkpoint_dir: checkpoints/batchtopk_k32_w4096
 save_all_checkpoints: false
 
+# Tier 3 Residue Collapse canary: ptm_sites.jsonl exists (data/processed/, and via the remote
+# HF dataset fallback for Kaggle). collapse_check_interval_steps left unset -> defaults to 5x
+# eval_interval_steps.
+enable_collapse_check: true
+
 cache_dir: cache/activations/esm2_650m_l24
 remote_repo_id: mustafa-muhaimin/ptm-sae-dataset
 remote_subpath: activations/esm2_t33_650M_UR50D/layer_24
@@ -31,6 +36,7 @@ num_workers: 0
 shuffle_buffer_size: 65536
 
 wandb:
-  enabled: false
+  enabled: true
   project: ptm-sae
   run_name: batchtopk_k32_w4096
+  tags: [ablation-phase2, batchtopk]

@@ -40,6 +40,13 @@ SAEModel = TopKSAEModel | JumpReLUSAEModel | BatchTopKSAEModel | GatedSAEModel
 # (JumpReLU, Gated) doesn't take that keyword at all.
 _AUXK_ARCHITECTURES = ("topk", "batchtopk")
 
+MODEL_CLASS_BY_TYPE = {
+    "topk": TopKSAEModel,
+    "batchtopk": BatchTopKSAEModel,
+    "gated": GatedSAEModel,
+    "jumprelu": JumpReLUSAEModel,
+}
+
 
 def _build_model(config: SAETrainingConfig) -> SAEModel:
     if config.sae_type in _AUXK_ARCHITECTURES:
@@ -78,6 +85,50 @@ def _build_model(config: SAETrainingConfig) -> SAEModel:
             init_threshold=config.init_threshold,
         )
     )
+
+
+def _save_resume_state(
+    latest_dir: Path,
+    step: int,
+    epoch: int,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    tokens_since_fired: torch.Tensor,
+    best_val_mse: float,
+    wandb_run_id: str | None,
+) -> None:
+    """Written inside checkpoint_dir/latest/ (not the checkpoint_dir root) so a single
+    wandb.Artifact.add_dir(latest/) call bundles the whole resume bundle alongside the HF
+    weights in one upload. checkpoint_dir/best/ never gets this file — it stays pure HF
+    weights, since that's the one that gets promoted to the Hub or shared, and optimizer
+    moment buffers have no business riding along with a result checkpoint."""
+    torch.save(
+        {
+            "step": step,
+            "epoch": epoch,
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+            "tokens_since_fired": tokens_since_fired,
+            "best_val_mse": best_val_mse,
+            "wandb_run_id": wandb_run_id,
+        },
+        latest_dir / "resume_state.pt",
+    )
+
+
+def _load_resume_state(latest_dir: Path, device: torch.device) -> dict:
+    return torch.load(latest_dir / "resume_state.pt", map_location=device, weights_only=False)
+
+
+def _log_checkpoint_artifact(wandb_run, checkpoint_dir: Path, sae_type: str, alias: str) -> None:
+    """Logs a checkpoint dir as a W&B Artifact. Artifacts are natively attached to the run
+    that created them (shown on the run's page), which is what makes a checkpoint "paired
+    with its run" without any manifest file of our own to maintain."""
+    import wandb
+
+    artifact = wandb.Artifact(name=f"sae-{sae_type}", type="model")
+    artifact.add_dir(str(checkpoint_dir))
+    wandb_run.log_artifact(artifact, aliases=[alias])
 
 
 def _forward(
@@ -216,14 +267,30 @@ def run_sae_training(
     checkpoint_dir = Path(config.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resuming reconstructs the model from a PREVIOUS run's checkpoint_dir/latest/ (weights +
+    # optimizer/scheduler/step/dead-latent-census/wandb_run_id) rather than building fresh.
+    # No RNG state needs restoring: ActivationPartitionDataset.set_epoch() reseeds shuffling
+    # purely from (seed, epoch, worker_id), and none of the four architectures use dropout.
+    resume_state: dict | None = None
+    if config.resume_from is not None:
+        resume_latest_dir = Path(config.resume_from) / "latest"
+        model = MODEL_CLASS_BY_TYPE[config.sae_type].from_pretrained(resume_latest_dir).to(device)
+        resume_state = _load_resume_state(resume_latest_dir, device)
+    else:
+        model = _build_model(config).to(device)
+
     wandb_run = None
     if config.wandb.enabled:
         import wandb
 
+        resumed_run_id = resume_state["wandb_run_id"] if resume_state is not None else None
         wandb_run = wandb.init(
             project=config.wandb.project,
             name=config.wandb.run_name,
             config=config.model_dump(),
+            tags=config.wandb.tags,
+            id=resumed_run_id,
+            resume="must" if resumed_run_id is not None else None,
         )
 
     collapse_labels = None
@@ -234,7 +301,8 @@ def run_sae_training(
             remote_corpus_subpath=config.remote_corpus_subpath,
         )
 
-    model = _build_model(config).to(device)
+    # Optimizer/scheduler are built AFTER the (possibly resumed) model so their param
+    # references point at the loaded weights, then their state dicts are restored on top.
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.0)
 
     scheduler = None
@@ -244,6 +312,11 @@ def run_sae_training(
             num_warmup_steps=config.warmup_steps,
             num_training_steps=config.total_steps,
         )
+
+    if resume_state is not None:
+        optimizer.load_state_dict(resume_state["optimizer_state"])
+        if scheduler is not None and resume_state["scheduler_state"] is not None:
+            scheduler.load_state_dict(resume_state["scheduler_state"])
 
     train_dataset, train_loader = build_partition_dataloader(
         "discovery_train",
@@ -273,14 +346,21 @@ def run_sae_training(
 
     # Dead-latent census: token-windowed, owned by the training loop (not the model) so the
     # model itself stays a stateless, checkpoint-friendly transformers.PreTrainedModel.
-    tokens_since_fired = torch.zeros(config.d_hidden, device=device)
+    if resume_state is not None:
+        tokens_since_fired = resume_state["tokens_since_fired"].to(device)
+        step = resume_state["step"]
+        epoch = resume_state["epoch"]
+        best_val_mse = resume_state["best_val_mse"]
+    else:
+        tokens_since_fired = torch.zeros(config.d_hidden, device=device)
+        step = 0
+        epoch = 0
+        best_val_mse = float("inf")
 
     pm.print(f"\n[SAE Training] sae_type={config.sae_type} device={device} dtype={config.dtype}")
     pm.print(f"  total_steps={config.total_steps} batch_size={config.batch_size}")
-
-    best_val_mse = float("inf")
-    step = 0
-    epoch = 0
+    if resume_state is not None:
+        pm.print(f"  Resumed from {config.resume_from} at step {step} (epoch {epoch})")
     # Previous eval's alive-latent set (fired >=1x on discovery_val) — None until the first
     # eval completes. Its Jaccard overlap with the current eval's set tracks whether the
     # feature basis has stopped reorganizing (expected late) or is still shifting (expected
@@ -383,11 +463,27 @@ def run_sae_training(
                     )
 
                 model.save_pretrained(checkpoint_dir / "latest")
+                _save_resume_state(
+                    checkpoint_dir / "latest",
+                    step,
+                    epoch,
+                    optimizer,
+                    scheduler,
+                    tokens_since_fired,
+                    best_val_mse,
+                    wandb_run.id if wandb_run is not None else None,
+                )
+                if wandb_run is not None:
+                    # Logged every eval interval (not just at the very end) so the cloud copy
+                    # is always resume-ready — precisely when a Kaggle session might die.
+                    _log_checkpoint_artifact(wandb_run, checkpoint_dir / "latest", config.sae_type, "latest")
                 if config.save_all_checkpoints:
                     model.save_pretrained(checkpoint_dir / f"step_{step}")
                 if eval_stats["mse"] < best_val_mse:
                     best_val_mse = eval_stats["mse"]
                     model.save_pretrained(checkpoint_dir / "best")
+                    if wandb_run is not None:
+                        _log_checkpoint_artifact(wandb_run, checkpoint_dir / "best", config.sae_type, "best")
                     pm.print(f"  New best checkpoint saved (val_mse={best_val_mse:.4f})")
 
             if collapse_labels is not None and (
@@ -426,9 +522,18 @@ def main():
         description="Train a baseline SAE (TopK, JumpReLU, BatchTopK, or Gated)"
     )
     parser.add_argument("--config", type=str, required=True, help="Path to training YAML config")
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Path to a previous run's checkpoint_dir root, overriding config.resume_from — "
+        "keeps one YAML config reusable for both a fresh and a resumed invocation.",
+    )
     args = parser.parse_args()
 
     cfg = SAETrainingConfig.from_yaml(args.config)
+    if args.resume_from is not None:
+        cfg = cfg.model_copy(update={"resume_from": args.resume_from})
     run_sae_training(cfg)
 
 

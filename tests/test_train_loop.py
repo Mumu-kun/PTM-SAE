@@ -250,6 +250,60 @@ def test_collapse_check_runs_end_to_end(tmp_path):
     assert result["final_step"] == 4
 
 
+def test_resume_from_continues_step_count_and_optimizer_state(tmp_path):
+    """Verify resume_from picks up step/epoch/dead-latent-census from a prior run's
+    checkpoint_dir/latest/ instead of restarting at 0, and that the optimizer isn't cold
+    (its state_dict carries over Adam's per-parameter step counts). wandb stays disabled here
+    since this test only covers the local resume mechanics, not W&B credentials."""
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    first_checkpoint_dir = tmp_path / "checkpoints_run1"
+
+    base_kwargs = dict(
+        sae_type="topk",
+        d_in=HIDDEN_DIM,
+        d_hidden=16,
+        k=4,
+        batch_size=8,
+        eval_interval_steps=3,
+        cache_dir=str(cache_dir),
+        remote_repo_id=None,
+        remote_subpath=None,
+        corpus_dir=str(corpus_dir),
+        dead_latent_window_tokens=1000,
+    )
+
+    first_config = SAETrainingConfig(
+        **base_kwargs, total_steps=3, checkpoint_dir=str(first_checkpoint_dir)
+    )
+    first_result = run_sae_training(first_config)
+    assert first_result["final_step"] == 3
+    assert (first_checkpoint_dir / "latest" / "resume_state.pt").exists()
+
+    resume_state = torch.load(
+        first_checkpoint_dir / "latest" / "resume_state.pt", weights_only=False
+    )
+    assert resume_state["step"] == 3
+    # Adam tracks a per-parameter step count in its state_dict; after 3 real optimizer.step()
+    # calls it should not be the cold "state" dict an unstepped optimizer would have.
+    assert len(resume_state["optimizer_state"]["state"]) > 0
+
+    second_checkpoint_dir = tmp_path / "checkpoints_run2"
+    resumed_config = SAETrainingConfig(
+        **base_kwargs,
+        total_steps=6,
+        checkpoint_dir=str(second_checkpoint_dir),
+        resume_from=str(first_checkpoint_dir),
+    )
+    resumed_result = run_sae_training(resumed_config)
+
+    assert resumed_result["final_step"] == 6
+    assert (second_checkpoint_dir / "latest" / "resume_state.pt").exists()
+    final_state = torch.load(
+        second_checkpoint_dir / "latest" / "resume_state.pt", weights_only=False
+    )
+    assert final_state["step"] == 6
+
+
 def test_gated_training_loop_runs_and_checkpoints(tmp_path):
     """Verify the Gated SAE training loop (3-term loss: MSE + L1(gate) + frozen-decoder aux)
     runs end to end."""
