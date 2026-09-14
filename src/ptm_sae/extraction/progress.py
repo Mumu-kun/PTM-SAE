@@ -344,10 +344,10 @@ class PipelineProgressManager:
         """Render single dashboard card using IPython display update handle."""
         if not self.enabled or not self._display_fn:
             return
+        self._display_or_update(PreformattedCard(self._generate_dashboard_card()))
 
-        card_text = self._generate_dashboard_card()
-        rich_card = PreformattedCard(card_text)
-
+    def _display_or_update(self, rich_card: "PreformattedCard") -> None:
+        """Shared display-handle plumbing for any single in-place-refreshing card."""
         if self._display_handle is None:
             try:
                 self._display_handle = self._display_fn(rich_card, display_id=True)
@@ -358,3 +358,17 @@ class PipelineProgressManager:
                 self._display_handle.update(rich_card)
             except Exception:  # noqa: BLE001
                 self._display_fn(rich_card)
+
+    def render_card(self, title: str, lines: list[str]) -> None:
+        """Render/refresh a single generic dashboard card independent of the extraction
+        pipeline's 5-stage state — for callers (e.g. the SAE training loop) that want a
+        compact, in-place-refreshing notebook view without adopting the stage machinery above.
+        Falls back to a plain `print()` line outside an interactive notebook.
+        """
+        if not self.enabled:
+            return
+        card_text = "\n".join([title, "─" * max(len(title), 8), *lines])
+        if not self.is_interactive or not self._display_fn:
+            self.print(card_text)
+            return
+        self._display_or_update(PreformattedCard(card_text))
