@@ -29,10 +29,14 @@ from ptm_sae.models import (
 )
 from ptm_sae.training.collapse_check import (
     load_discovery_val_labels,
-    run_collapse_check,
+    run_ptm_concentration_check,
 )
 from ptm_sae.training.config import SAETrainingConfig
 from ptm_sae.training.dataset import build_partition_dataloader
+from ptm_sae.training.residue_dominance import (
+    load_discovery_val_sequences,
+    run_residue_dominance_check,
+)
 
 SAEModel = TopKSAEModel | JumpReLUSAEModel | BatchTopKSAEModel | GatedSAEModel
 
@@ -163,6 +167,24 @@ def _total_loss(
     # gated: Eq. 8 (Rajamanoharan et al., 2024a) — main MSE + lambda*L1(gate) + aux reconstruction,
     # the auxiliary term added at weight 1 directly, no separate coefficient in the paper's loss.
     return out.mse_loss + config.l1_coefficient * out.l1_loss + out.aux_loss
+
+
+def _architecture_specific_metrics(config: SAETrainingConfig, model: SAEModel, out: SAEOutput) -> dict[str, float]:
+    """Surfaces values already computed in forward()/the model's own buffers but otherwise
+    never logged: Gated's l1_loss/aux_loss, TopK/BatchTopK's AuxK aux_loss, BatchTopK's
+    running eval-time threshold, JumpReLU's per-latent threshold. No new computation."""
+    metrics: dict[str, float] = {}
+    if out.l1_loss is not None:
+        metrics["l1_loss"] = out.l1_loss.item()
+    if out.aux_loss is not None:
+        metrics["aux_loss"] = out.aux_loss.item()
+    if config.sae_type == "batchtopk":
+        metrics["running_threshold"] = model.running_threshold.item()
+    if config.sae_type == "jumprelu":
+        threshold = model.log_threshold.exp()
+        metrics["threshold_mean"] = threshold.mean().item()
+        metrics["threshold_std"] = threshold.std().item()
+    return metrics
 
 
 class _StreamingEvalStats:
@@ -301,6 +323,14 @@ def run_sae_training(
             remote_corpus_subpath=config.remote_corpus_subpath,
         )
 
+    residue_dominance_sequences = None
+    if config.enable_residue_dominance_check:
+        residue_dominance_sequences = load_discovery_val_sequences(
+            corpus_dir=config.corpus_dir,
+            remote_repo_id=config.remote_repo_id,
+            remote_corpus_subpath=config.remote_corpus_subpath,
+        )
+
     # Optimizer/scheduler are built AFTER the (possibly resumed) model so their param
     # references point at the loaded weights, then their state dicts are restored on top.
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.0)
@@ -405,12 +435,14 @@ def run_sae_training(
                 dead_frac = (
                     (tokens_since_fired > config.dead_latent_window_tokens).float().mean().item()
                 )
+                arch_metrics = _architecture_specific_metrics(config, model, out)
                 pm.render_card(
                     f"[SAE Training] {config.sae_type}",
                     [
                         f"step {step}/{config.total_steps}",
                         f"loss={loss.item():.4f}  mse={out.mse_loss.item():.4f}  l0={out.l0.item():.1f}",
                         f"dead={dead_frac:.1%}  decoder_pre_norm={decoder_pre_norm_mean:.3f}",
+                        *([f"{k}={v:.4f}" for k, v in arch_metrics.items()] if arch_metrics else []),
                         pm.get_vram_telemetry(),
                     ],
                 )
@@ -422,7 +454,8 @@ def run_sae_training(
                             "train/l0": out.l0.item(),
                             "train/dead_latent_fraction": dead_frac,
                             "train/decoder_pre_norm_mean": decoder_pre_norm_mean,
-                        },
+                        }
+                        | {f"train/{k}": v for k, v in arch_metrics.items()},
                         step=step,
                     )
 
@@ -486,25 +519,63 @@ def run_sae_training(
                         _log_checkpoint_artifact(wandb_run, checkpoint_dir / "best", config.sae_type, "best")
                     pm.print(f"  New best checkpoint saved (val_mse={best_val_mse:.4f})")
 
+            if (collapse_labels is not None or residue_dominance_sequences is not None) and (
+                step % config.collapse_check_interval_steps == 0 or step == config.total_steps
+            ):
+                pm.print(f"\n  [interpretability check @ step {step}] (discovery_val only)")
+
             if collapse_labels is not None and (
                 step % config.collapse_check_interval_steps == 0 or step == config.total_steps
             ):
-                collapse_stats = run_collapse_check(model, collapse_labels, config, device)
-                pm.print(f"\n  [collapse-check @ step {step}] (discovery_val only)")
-                for stratum, stratum_stats in collapse_stats.items():
+                collapse_stats = run_ptm_concentration_check(model, collapse_labels, config, device)
+                for stratum, stratum_stats in collapse_stats["by_stratum"].items():
                     pm.print(
-                        f"    {stratum}: mean_concentration_ratio="
+                        f"    by_stratum/{stratum}: mean_concentration_ratio="
                         f"{stratum_stats['mean_concentration_ratio']:.2f}  "
                         f"n_latents_above_2x_baseline={stratum_stats['n_latents_above_2x_baseline']:.0f}"
                         f" / n_active_latents={stratum_stats['n_active_latents']:.0f}"
                     )
+                for pair_key, pair_stats in collapse_stats["by_ptm_type"].items():
+                    pm.print(
+                        f"    by_ptm_type/{pair_key}: mean_concentration_ratio="
+                        f"{pair_stats['mean_concentration_ratio']:.2f}  "
+                        f"best_latent_ratio={pair_stats['best_latent_ratio']:.2f}  "
+                        f"n_latents_near_best={pair_stats['n_latents_near_best']:.0f}"
+                    )
+                for stratum, negtier_stats in collapse_stats["by_negative_tier"].items():
+                    pm.print(
+                        f"    by_negative_tier/{stratum}: "
+                        f"n_latents_shortcut_suspect={negtier_stats['n_latents_shortcut_suspect']:.0f}"
+                    )
                 if wandb_run is not None:
                     wandb_run.log(
                         {
-                            f"collapse_check/{stratum}/{metric}": value
-                            for stratum, stratum_stats in collapse_stats.items()
-                            for metric, value in stratum_stats.items()
+                            f"collapse_check/{section}/{key}/{metric}": value
+                            for section, section_stats in collapse_stats.items()
+                            for key, key_stats in section_stats.items()
+                            for metric, value in key_stats.items()
                         },
+                        step=step,
+                    )
+
+            if residue_dominance_sequences is not None and (
+                step % config.collapse_check_interval_steps == 0 or step == config.total_steps
+            ):
+                dominance_stats = run_residue_dominance_check(
+                    model,
+                    residue_dominance_sequences,
+                    config,
+                    device,
+                    config.residue_dominance_top_k,
+                    config.residue_dominance_threshold,
+                )
+                pm.print(
+                    f"    residue_dominance: collapse_rate={dominance_stats['collapse_rate']:.1%}"
+                    f" / n_latents={dominance_stats['n_latents']:.0f}"
+                )
+                if wandb_run is not None:
+                    wandb_run.log(
+                        {f"residue_dominance/{k}": v for k, v in dominance_stats.items()},
                         step=step,
                     )
 

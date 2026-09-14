@@ -74,6 +74,13 @@ class SAETrainingConfig(BaseModel):
     # reconstruction pass, so it runs less often by default.
     collapse_check_interval_steps: int | None = None
 
+    # Residue-Dominance Gate canary (Unified_Thesis_Plan_Modular_SAE_PTM.md Phase 2 acceptance
+    # metric, mirroring Member 2's M9/M16) — needs no PTM labels, only residue identity, so it's
+    # cheaper than the Tier 3 checks above. Shares their reduced cadence (collapse_check_interval_steps).
+    enable_residue_dominance_check: bool = False
+    residue_dominance_top_k: int = 10
+    residue_dominance_threshold: float = 0.7
+
     # Data source (mirrors ActivationPartitionDataset / SafeTensorsReader)
     cache_dir: str = "cache/activations/esm2_650m_l24"
     remote_repo_id: str | None = "mustafa-muhaimin/ptm-sae-dataset"

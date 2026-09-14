@@ -62,14 +62,34 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
         json.dump(manifest, f)
 
     partitions = [
-        {"uniprot_id": "proteinA", "partition": "discovery_train"},
-        {"uniprot_id": "proteinB", "partition": "discovery_train"},
-        {"uniprot_id": "proteinC", "partition": "discovery_val"},
+        {"uniprot_id": "proteinA", "partition": "discovery_train", "sequence": "A" * 20},
+        {"uniprot_id": "proteinB", "partition": "discovery_train", "sequence": "A" * 15},
+        # Sequence deliberately matches the positions used by `_write_rich_ptm_sites` below:
+        # 1:K 2:K 3:S 4:S 5:S 6:T 7-10:A.
+        {"uniprot_id": "proteinC", "partition": "discovery_val", "sequence": "KKSSSTAAAA"},
     ]
     with open(corpus_dir / "proteins.jsonl", "w", encoding="utf-8") as f:
         f.writelines(json.dumps(p) + "\n" for p in partitions)
 
     return cache_dir, corpus_dir
+
+
+def _write_rich_ptm_sites(corpus_dir: Path) -> None:
+    """A discovery_val label set covering all three collapse-check breakdowns: two strata, a
+    multi-label residue (position 5 carries two PTM types), and both a `hard` and a `verified`
+    negative — plus one held_out site that must never be touched by the training-time canary."""
+    sites = [
+        {"uniprot_id": "proteinC", "position": 1, "residue": "K", "stratum": "lysine", "ptm_types": ["ubiquitination"], "partition": "discovery_val"},
+        {"uniprot_id": "proteinC", "position": 2, "residue": "K", "stratum": "lysine", "ptm_types": [], "partition": "discovery_val"},
+        {"uniprot_id": "proteinC", "position": 3, "residue": "S", "stratum": "serine_threonine", "ptm_types": ["phosphorylation"], "partition": "discovery_val"},
+        {"uniprot_id": "proteinC", "position": 4, "residue": "S", "stratum": "serine_threonine", "ptm_types": [], "negative_tier": "hard", "partition": "discovery_val"},
+        {"uniprot_id": "proteinC", "position": 5, "residue": "S", "stratum": "serine_threonine", "ptm_types": ["phosphorylation", "glycosylation"], "partition": "discovery_val"},
+        {"uniprot_id": "proteinC", "position": 6, "residue": "T", "stratum": "serine_threonine", "ptm_types": [], "negative_tier": "verified", "partition": "discovery_val"},
+        # A held_out site must never be touched by the training-time canary.
+        {"uniprot_id": "proteinD", "position": 1, "residue": "K", "stratum": "lysine", "ptm_types": ["ubiquitination"], "partition": "held_out"},
+    ]
+    with open(corpus_dir / "ptm_sites.jsonl", "w", encoding="utf-8") as f:
+        f.writelines(json.dumps(s) + "\n" for s in sites)
 
 
 def test_topk_training_loop_runs_and_checkpoints(tmp_path):
@@ -209,23 +229,13 @@ def test_topk_training_loop_logs_tier2_diagnostics(tmp_path, capsys):
     assert "alive_latent_jaccard=n/a" in out
 
 
-def test_collapse_check_runs_end_to_end(tmp_path):
+def test_collapse_check_runs_end_to_end(tmp_path, capsys):
     """Verify the opt-in Tier 3 Residue Collapse canary joins ptm_sites.jsonl to discovery_val
-    activations and logs a per-stratum concentration statistic, without touching held_out."""
+    activations and logs all three breakdowns (by_stratum, by_ptm_type, by_negative_tier),
+    without touching held_out."""
     cache_dir, corpus_dir = _write_fixture(tmp_path)
+    _write_rich_ptm_sites(corpus_dir)
     checkpoint_dir = tmp_path / "checkpoints"
-
-    # proteinC (discovery_val, length 10) — label a few residues across two strata.
-    sites = [
-        {"uniprot_id": "proteinC", "position": 1, "residue": "K", "stratum": "lysine", "ptm_types": ["ubiquitination"], "partition": "discovery_val"},
-        {"uniprot_id": "proteinC", "position": 2, "residue": "K", "stratum": "lysine", "ptm_types": [], "partition": "discovery_val"},
-        {"uniprot_id": "proteinC", "position": 3, "residue": "S", "stratum": "serine_threonine", "ptm_types": ["phosphorylation"], "partition": "discovery_val"},
-        {"uniprot_id": "proteinC", "position": 4, "residue": "S", "stratum": "serine_threonine", "ptm_types": [], "partition": "discovery_val"},
-        # A held_out site must never be touched by the training-time canary.
-        {"uniprot_id": "proteinD", "position": 1, "residue": "K", "stratum": "lysine", "ptm_types": ["ubiquitination"], "partition": "held_out"},
-    ]
-    with open(corpus_dir / "ptm_sites.jsonl", "w", encoding="utf-8") as f:
-        f.writelines(json.dumps(s) + "\n" for s in sites)
 
     config = SAETrainingConfig(
         sae_type="topk",
@@ -246,8 +256,205 @@ def test_collapse_check_runs_end_to_end(tmp_path):
     )
 
     result = run_sae_training(config)
+    out = capsys.readouterr().out
 
     assert result["final_step"] == 4
+    assert "by_stratum/lysine" in out
+    assert "by_ptm_type/serine_threonine__phosphorylation" in out
+    assert "by_negative_tier/serine_threonine" in out
+
+
+def test_ptm_concentration_check_reports_three_sections(tmp_path):
+    """Unit-level check of run_ptm_concentration_check's structure against a label set with a
+    multi-label residue (contributes to two ptm_type pairs at once) and a hard negative."""
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    _write_rich_ptm_sites(corpus_dir)
+
+    from ptm_sae.models import TopKSAEConfig, TopKSAEModel
+    from ptm_sae.training.collapse_check import (
+        load_discovery_val_labels,
+        run_ptm_concentration_check,
+    )
+
+    model = TopKSAEModel(TopKSAEConfig(d_in=HIDDEN_DIM, d_hidden=16, k=4))
+    labels = load_discovery_val_labels(corpus_dir=str(corpus_dir))
+    config = SAETrainingConfig(
+        sae_type="topk",
+        d_in=HIDDEN_DIM,
+        d_hidden=16,
+        k=4,
+        total_steps=1,
+        cache_dir=str(cache_dir),
+        remote_repo_id=None,
+        remote_subpath=None,
+        corpus_dir=str(corpus_dir),
+    )
+
+    result = run_ptm_concentration_check(model, labels, config, torch.device("cpu"))
+
+    assert set(result.keys()) == {"by_stratum", "by_ptm_type", "by_negative_tier"}
+    assert set(result["by_stratum"].keys()) == {"lysine", "serine_threonine"}
+    assert set(result["by_ptm_type"].keys()) == {
+        "lysine__ubiquitination",
+        "serine_threonine__phosphorylation",
+        "serine_threonine__glycosylation",
+    }
+    # Only "hard" negatives produce a shortcut-suspect flag; "verified" is tracked but not reported.
+    assert set(result["by_negative_tier"].keys()) == {"serine_threonine"}
+    assert result["by_negative_tier"]["serine_threonine"]["n_latents_shortcut_suspect"] >= 0
+
+
+def test_residue_dominance_check_runs_end_to_end(tmp_path, capsys):
+    """Verify the opt-in, PTM-label-free Residue-Dominance Gate canary runs against
+    proteins.jsonl sequences alone and logs a collapse_rate."""
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    config = SAETrainingConfig(
+        sae_type="topk",
+        d_in=HIDDEN_DIM,
+        d_hidden=16,
+        k=4,
+        total_steps=4,
+        batch_size=8,
+        eval_interval_steps=4,
+        enable_residue_dominance_check=True,
+        collapse_check_interval_steps=4,
+        residue_dominance_top_k=3,
+        checkpoint_dir=str(checkpoint_dir),
+        cache_dir=str(cache_dir),
+        remote_repo_id=None,
+        remote_subpath=None,
+        corpus_dir=str(corpus_dir),
+        dead_latent_window_tokens=1000,
+    )
+
+    result = run_sae_training(config)
+    out = capsys.readouterr().out
+
+    assert result["final_step"] == 4
+    assert "residue_dominance: collapse_rate=" in out
+
+
+def test_residue_dominance_accumulator_reports_valid_collapse_rate(tmp_path):
+    """Unit-level check that run_residue_dominance_check reports a well-formed collapse_rate
+    over the fixture's discovery_val sequence."""
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+
+    from ptm_sae.models import TopKSAEConfig, TopKSAEModel
+    from ptm_sae.training.residue_dominance import (
+        load_discovery_val_sequences,
+        run_residue_dominance_check,
+    )
+
+    model = TopKSAEModel(TopKSAEConfig(d_in=HIDDEN_DIM, d_hidden=16, k=4))
+    sequences = load_discovery_val_sequences(corpus_dir=str(corpus_dir))
+    assert sequences == {"proteinC": "KKSSSTAAAA"}
+
+    config = SAETrainingConfig(
+        sae_type="topk",
+        d_in=HIDDEN_DIM,
+        d_hidden=16,
+        k=4,
+        total_steps=1,
+        cache_dir=str(cache_dir),
+        remote_repo_id=None,
+        remote_subpath=None,
+        corpus_dir=str(corpus_dir),
+    )
+
+    stats = run_residue_dominance_check(model, sequences, config, torch.device("cpu"), top_k=3, threshold=0.7)
+
+    assert stats["n_latents"] == 16
+    assert 0.0 <= stats["collapse_rate"] <= 1.0
+
+
+def test_gated_training_loop_logs_free_architecture_metrics(tmp_path, capsys):
+    """Verify Gated's already-computed l1_loss/aux_loss reach the log without any new
+    computation being added."""
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    config = SAETrainingConfig(
+        sae_type="gated",
+        d_in=HIDDEN_DIM,
+        d_hidden=16,
+        l1_coefficient=1e-3,
+        total_steps=6,
+        batch_size=8,
+        eval_interval_steps=3,
+        checkpoint_dir=str(checkpoint_dir),
+        cache_dir=str(cache_dir),
+        remote_repo_id=None,
+        remote_subpath=None,
+        corpus_dir=str(corpus_dir),
+        dead_latent_window_tokens=1000,
+    )
+
+    run_sae_training(config)
+    out = capsys.readouterr().out
+
+    assert "l1_loss=" in out
+    assert "aux_loss=" in out
+
+
+def test_batchtopk_training_loop_logs_running_threshold(tmp_path, capsys):
+    """Verify BatchTopK's running_threshold buffer (used for eval-time inference) reaches
+    the log."""
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    config = SAETrainingConfig(
+        sae_type="batchtopk",
+        d_in=HIDDEN_DIM,
+        d_hidden=16,
+        k=4,
+        total_steps=6,
+        batch_size=8,
+        eval_interval_steps=3,
+        checkpoint_dir=str(checkpoint_dir),
+        cache_dir=str(cache_dir),
+        remote_repo_id=None,
+        remote_subpath=None,
+        corpus_dir=str(corpus_dir),
+        dead_latent_window_tokens=1000,
+    )
+
+    run_sae_training(config)
+    out = capsys.readouterr().out
+
+    assert "running_threshold=" in out
+    assert "aux_loss=" in out
+
+
+def test_jumprelu_training_loop_logs_threshold_stats(tmp_path, capsys):
+    """Verify JumpReLU's per-latent threshold mean/std reach the log."""
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    config = SAETrainingConfig(
+        sae_type="jumprelu",
+        d_in=HIDDEN_DIM,
+        d_hidden=16,
+        l0_coefficient=1e-3,
+        l0_warmup_steps=3,
+        total_steps=6,
+        warmup_steps=2,
+        batch_size=8,
+        eval_interval_steps=3,
+        checkpoint_dir=str(checkpoint_dir),
+        cache_dir=str(cache_dir),
+        remote_repo_id=None,
+        remote_subpath=None,
+        corpus_dir=str(corpus_dir),
+        dead_latent_window_tokens=1000,
+    )
+
+    run_sae_training(config)
+    out = capsys.readouterr().out
+
+    assert "threshold_mean=" in out
+    assert "threshold_std=" in out
 
 
 def test_resume_from_continues_step_count_and_optimizer_state(tmp_path):
