@@ -10,6 +10,7 @@ matching a run's own `checkpoint_dir`).
 """
 
 import argparse
+import time
 from pathlib import Path
 
 import torch
@@ -423,11 +424,21 @@ def run_sae_training(
     # early).
     prev_alive_mask: torch.Tensor | None = None
 
+    # Rolling data-wait vs. compute time, reset every log interval — tells us whether the
+    # DataLoader (num_workers=0, so no background prefetch) or the GPU forward/backward is
+    # actually the per-step bottleneck, before assuming more GPUs would help.
+    data_wait_s_total = 0.0
+    compute_s_total = 0.0
+    steps_since_timing_log = 0
+
     while step < config.total_steps:
         train_dataset.set_epoch(epoch)
+        batch_wait_start = time.perf_counter()
         for batch in train_loader:
+            data_wait_s_total += time.perf_counter() - batch_wait_start
             if step >= config.total_steps:
                 break
+            compute_start = time.perf_counter()
             batch = batch.to(device)
             dead_latent_mask = tokens_since_fired > config.dead_latent_window_tokens
 
@@ -455,6 +466,11 @@ def run_sae_training(
             tokens_since_fired += batch.shape[0]
             tokens_since_fired[fired] = 0.0
 
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            compute_s_total += time.perf_counter() - compute_start
+            steps_since_timing_log += 1
+
             step += 1
 
             if step % max(1, config.eval_interval_steps // 10) == 0:
@@ -462,12 +478,15 @@ def run_sae_training(
                     (tokens_since_fired > config.dead_latent_window_tokens).float().mean().item()
                 )
                 arch_metrics = _architecture_specific_metrics(config, model, out)
+                data_wait_ms = 1000 * data_wait_s_total / steps_since_timing_log
+                compute_ms = 1000 * compute_s_total / steps_since_timing_log
                 pm.render_card(
                     f"[SAE Training] {config.sae_type}",
                     [
                         f"step {step}/{config.total_steps}",
                         f"loss={loss.item():.4f}  mse={out.mse_loss.item():.4f}  l0={out.l0.item():.1f}",
                         f"dead={dead_frac:.1%}  decoder_pre_norm={decoder_pre_norm_mean:.3f}",
+                        f"data_wait={data_wait_ms:.1f}ms/step  compute={compute_ms:.1f}ms/step",
                         *([f"{k}={v:.4f}" for k, v in arch_metrics.items()] if arch_metrics else []),
                         pm.get_vram_telemetry(),
                     ],
@@ -480,10 +499,17 @@ def run_sae_training(
                             "train/l0": out.l0.item(),
                             "train/dead_latent_fraction": dead_frac,
                             "train/decoder_pre_norm_mean": decoder_pre_norm_mean,
+                            "train/data_wait_ms": data_wait_ms,
+                            "train/compute_ms": compute_ms,
                         }
                         | {f"train/{k}": v for k, v in arch_metrics.items()},
                         step=step,
                     )
+                data_wait_s_total = 0.0
+                compute_s_total = 0.0
+                steps_since_timing_log = 0
+
+            batch_wait_start = time.perf_counter()
 
             if step % config.eval_interval_steps == 0 or step == config.total_steps:
                 eval_stats, alive_mask = _evaluate(model, val_loader, config, device)
