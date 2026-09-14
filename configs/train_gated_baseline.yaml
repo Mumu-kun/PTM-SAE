@@ -1,0 +1,38 @@
+# Gated SAE baseline — ESM-2 650M, Layer 24 (d_in=1280), discovery_train.
+# Recipe follows Rajamanoharan et al., 2024a: constant LR (no cited schedule evidence for this
+# architecture), no straight-through estimator — the gate trains via its own L1 penalty plus a
+# frozen-decoder auxiliary reconstruction (Eq. 8), both computed inside GatedSAEModel.forward.
+
+sae_type: gated
+d_in: 1280
+d_hidden: 4096
+
+# l1_coefficient has no safe default — it's the gate's sparsity penalty weight, the one you'd
+# actually sweep per ablation run. 1e-3 here is a starting point, not a tuned value.
+l1_coefficient: 0.001
+
+# Same corpus-scale reasoning as the other baselines: not separately re-benchmarked for Gated,
+# but its per-step cost is the same order as TopK/JumpReLU (two linear encoder paths, no STE).
+total_steps: 24000
+learning_rate: 0.0004
+batch_size: 4096
+dtype: fp32
+seed: 0
+
+dead_latent_window_tokens: 500000
+eval_interval_steps: 2000
+checkpoint_dir: checkpoints/gated_w4096
+save_all_checkpoints: false
+
+cache_dir: cache/activations/esm2_650m_l24
+remote_repo_id: mustafa-muhaimin/ptm-sae-dataset
+remote_subpath: activations/esm2_t33_650M_UR50D/layer_24
+corpus_dir: data/processed
+remote_corpus_subpath: corpus
+num_workers: 0
+shuffle_buffer_size: 65536
+
+wandb:
+  enabled: false
+  project: ptm-sae
+  run_name: gated_w4096

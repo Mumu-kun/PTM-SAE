@@ -1,7 +1,16 @@
-"""SAE Model architectures (TopK, JumpReLU, Modular SAE), built on transformers.PreTrainedModel."""
+"""SAE Model architectures (TopK, JumpReLU, BatchTopK, Gated, Modular SAE), built on
+transformers.PreTrainedModel."""
 
-from ptm_sae.models.configuration_sae import JumpReLUSAEConfig, SAEConfig, TopKSAEConfig
+from ptm_sae.models.configuration_sae import (
+    BatchTopKSAEConfig,
+    GatedSAEConfig,
+    JumpReLUSAEConfig,
+    SAEConfig,
+    TopKSAEConfig,
+)
 from ptm_sae.models.modeling_sae import (
+    BatchTopKSAEModel,
+    GatedSAEModel,
     JumpReLUSAEModel,
     SAEOutput,
     SAEPreTrainedModel,
@@ -9,6 +18,10 @@ from ptm_sae.models.modeling_sae import (
 )
 
 __all__ = [
+    "BatchTopKSAEConfig",
+    "BatchTopKSAEModel",
+    "GatedSAEConfig",
+    "GatedSAEModel",
     "JumpReLUSAEConfig",
     "JumpReLUSAEModel",
     "SAEConfig",
