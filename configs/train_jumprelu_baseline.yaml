@@ -1,16 +1,28 @@
 # JumpReLU SAE baseline — ESM-2 650M, Layer 24 (d_in=1280), discovery_train.
-# Recipe follows Rajamanoharan et al., 2024 (DeepMind): Adam, warmup+cosine LR, threshold and
-# bandwidth both initialized to 0.001, L0 coefficient warmed up separately over its own schedule.
+# Recipe follows Rajamanoharan et al., 2024 (DeepMind): Adam, warmup+cosine LR, L0 coefficient
+# warmed up separately over its own schedule.
 
 sae_type: jumprelu
 d_in: 1280
 d_hidden: 4096
-bandwidth: 0.001
+
+# bandwidth=0.001 (run j3futvdl) starved the threshold's straight-through pseudo-derivative:
+# it only receives gradient from latents whose pre-activation falls within bandwidth/2 of the
+# current threshold (modeling_sae.py's _JumpReLUSTE/_HeavisideSTE kernel), and that run's
+# train/threshold_std stayed ~3.5e-5 (never moved off init_threshold) while train/l0 plateaued
+# at ~2850/4096 — the window was too narrow to reach a meaningful fraction of latents on ESM-2
+# layer-24 activation scale. Widened 20x so threshold actually receives signal; watch
+# train/threshold_std diverge across latents in the first ~1-2k steps as the check that this
+# worked, not just train/l0 trending down.
+bandwidth: 0.02
 init_threshold: 0.001
 
 # l0_coefficient has no safe default — it's the reconstruction/sparsity tradeoff knob, the
-# one you'd actually sweep per ablation run. 1e-3 here is a starting point, not a tuned value.
-l0_coefficient: 0.001
+# one you'd actually sweep per ablation run. Raised 5x from j3futvdl's 0.001: with the wider
+# bandwidth above now actually letting gradient reach the threshold, a stronger penalty is
+# needed to pull L0 down instead of just amplifying gradient for the same starved sliver of
+# latents. Still a starting point to re-tune, not a final value.
+l0_coefficient: 0.005
 l0_warmup_steps: 3000
 
 # Measured on real Kaggle GPU session: 55,345 tok/s at width=4096. ~5.08M discovery_train
@@ -26,14 +38,18 @@ dtype: fp32
 seed: 0
 
 dead_latent_window_tokens: 500000
-eval_interval_steps: 2000
+eval_interval_steps: 500
 checkpoint_dir: checkpoints/jumprelu_w4096
 save_all_checkpoints: false
 
 # Tier 3 Residue Collapse canary: ptm_sites.jsonl exists (data/processed/, and via the remote
-# HF dataset fallback for Kaggle). collapse_check_interval_steps left unset -> defaults to 5x
-# eval_interval_steps.
+# HF dataset fallback for Kaggle).
 enable_collapse_check: true
+collapse_check_interval_steps: 2000
+
+# Residue-Dominance Gate canary — needs only residue identity (no PTM labels), so it's cheaper
+# than the Tier 3 check above. Shares its cadence (collapse_check_interval_steps).
+enable_residue_dominance_check: true
 
 cache_dir: cache/activations/esm2_650m_l24
 remote_repo_id: mustafa-muhaimin/ptm-sae-dataset

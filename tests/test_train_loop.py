@@ -227,6 +227,8 @@ def test_topk_training_loop_logs_tier2_diagnostics(tmp_path, capsys):
     assert "decoder_pre_norm" in out
     # First eval has no prior alive-set to compare against; the second eval (step 6) should.
     assert "alive_latent_jaccard=n/a" in out
+    assert "tok/s" in out
+    assert "ETA" in out
 
 
 def test_collapse_check_runs_end_to_end(tmp_path, capsys):
@@ -262,6 +264,42 @@ def test_collapse_check_runs_end_to_end(tmp_path, capsys):
     assert "by_stratum/lysine" in out
     assert "by_ptm_type/serine_threonine__phosphorylation" in out
     assert "by_negative_tier/serine_threonine" in out
+
+
+def test_collapse_check_wandb_logging_runs_offline(tmp_path, monkeypatch):
+    """Verify the wandb.Table summary + per-section wandb.plot.line_series trend charts (built
+    from the collapse-check breakdowns) actually construct and log without error — run in
+    WANDB_MODE=offline so no network/credentials are needed, but every wandb API call for real."""
+    monkeypatch.setenv("WANDB_MODE", "offline")
+    monkeypatch.chdir(tmp_path)
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    _write_rich_ptm_sites(corpus_dir)
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    config = SAETrainingConfig(
+        sae_type="topk",
+        d_in=HIDDEN_DIM,
+        d_hidden=16,
+        k=4,
+        total_steps=8,
+        batch_size=8,
+        eval_interval_steps=4,
+        enable_collapse_check=True,
+        collapse_check_interval_steps=4,
+        checkpoint_dir=str(checkpoint_dir),
+        cache_dir=str(cache_dir),
+        remote_repo_id=None,
+        remote_subpath=None,
+        corpus_dir=str(corpus_dir),
+        dead_latent_window_tokens=1000,
+        wandb={"enabled": True, "project": "ptm-sae-test"},
+    )
+
+    # Runs the collapse-check block twice (step 4 and step 8), exercising the trend-history
+    # accumulation across more than one call, not just a single-point chart.
+    result = run_sae_training(config)
+
+    assert result["final_step"] == 8
 
 
 def test_ptm_concentration_check_reports_three_sections(tmp_path):

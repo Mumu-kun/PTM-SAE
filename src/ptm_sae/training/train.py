@@ -172,6 +172,17 @@ def _total_loss(
     return out.mse_loss + config.l1_coefficient * out.l1_loss + out.aux_loss
 
 
+def _format_duration(seconds: float) -> str:
+    """Mirrors `PipelineProgressManager.finish_stage`'s elapsed-time formatting, extended with
+    an hours tier — a 24k-step run's ETA can run into hours, not just minutes."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+
 def _architecture_specific_metrics(config: SAETrainingConfig, model: SAEModel, out: SAEOutput) -> dict[str, float]:
     """Surfaces values already computed in forward()/the model's own buffers but otherwise
     never logged: Gated's l1_loss/aux_loss, TopK/BatchTopK's AuxK aux_loss, BatchTopK's
@@ -431,6 +442,22 @@ def run_sae_training(
     # early).
     prev_alive_mask: torch.Tensor | None = None
 
+    # History for W&B multi-series trend charts, one chart per collapse-check section with all
+    # its strata/PTM-types/negative-tiers overlaid on a shared step axis — wandb.plot.line_series
+    # needs the full series resent each call (unlike plain scalar logging), and this replaces a
+    # separate line-chart panel per dynamic key with one comparable chart per section.
+    collapse_check_steps: list[int] = []
+    collapse_trend_history: dict[str, dict[str, list[float]]] = {
+        "by_stratum": {},
+        "by_ptm_type": {},
+        "by_negative_tier": {},
+    }
+    _COLLAPSE_TREND_METRIC = {
+        "by_stratum": "mean_concentration_ratio",
+        "by_ptm_type": "mean_concentration_ratio",
+        "by_negative_tier": "n_latents_shortcut_suspect",
+    }
+
     # Rolling data-wait vs. compute time, reset every log interval — tells us whether the
     # DataLoader (num_workers=0, so no background prefetch) or the GPU forward/backward is
     # actually the per-step bottleneck, before assuming more GPUs would help.
@@ -487,6 +514,12 @@ def run_sae_training(
                 arch_metrics = _architecture_specific_metrics(config, model, out)
                 data_wait_ms = 1000 * data_wait_s_total / steps_since_timing_log
                 compute_ms = 1000 * compute_s_total / steps_since_timing_log
+                # Same recent window as data_wait/compute above (reset every log tick) rather
+                # than a whole-run average, so this reacts to real speed changes — e.g. once
+                # JumpReLU's LR warmup ends — instead of smoothing over the entire run.
+                step_time_s = (data_wait_s_total + compute_s_total) / steps_since_timing_log
+                tokens_per_sec = config.batch_size / step_time_s
+                eta_seconds = (config.total_steps - step) * step_time_s
                 pm.render_card(
                     f"[SAE Training] {config.sae_type}",
                     [
@@ -494,6 +527,7 @@ def run_sae_training(
                         f"loss={loss.item():.4f}  mse={out.mse_loss.item():.4f}  l0={out.l0.item():.1f}",
                         f"dead={dead_frac:.1%}  decoder_pre_norm={decoder_pre_norm_mean:.3f}",
                         f"data_wait={data_wait_ms:.1f}ms/step  compute={compute_ms:.1f}ms/step",
+                        f"{tokens_per_sec:.0f} tok/s  ETA {_format_duration(eta_seconds)}",
                         *([f"{k}={v:.4f}" for k, v in arch_metrics.items()] if arch_metrics else []),
                         pm.get_vram_telemetry(),
                     ],
@@ -508,6 +542,8 @@ def run_sae_training(
                             "train/decoder_pre_norm_mean": decoder_pre_norm_mean,
                             "train/data_wait_ms": data_wait_ms,
                             "train/compute_ms": compute_ms,
+                            "train/tokens_per_sec": tokens_per_sec,
+                            "train/eta_seconds": eta_seconds,
                         }
                         | {f"train/{k}": v for k, v in arch_metrics.items()},
                         step=step,
@@ -544,11 +580,16 @@ def run_sae_training(
                     ],
                 )
                 if wandb_run is not None:
-                    # feature_density_histogram is logged as a plain bin-count list (bins are
-                    # fixed log10-spaced buckets over (1e-12, 1], set by density_histogram_bins)
-                    # rather than a wandb.Histogram, to keep this path dependency-light.
+                    # feature_density_histogram's bin counts came back as a plain list from
+                    # _StreamingEvalStats (kept wandb-free); wrap it in wandb.Histogram here, at
+                    # the one call site that already depends on wandb, so the W&B UI renders it
+                    # as an evolving histogram panel instead of an opaque array-valued scalar.
+                    # Bin edges are log10-spaced over (1e-12, 1] to match torch.histc's args above.
+                    density_counts = eval_stats.pop("feature_density_histogram")
+                    density_edges = torch.linspace(-12.0, 0.0, steps=len(density_counts) + 1).tolist()
                     wandb_run.log(
                         {f"val/{k}": v for k, v in eval_stats.items()}
+                        | {"val/feature_density_histogram": wandb.Histogram(np_histogram=(density_counts, density_edges))}
                         | {"val/dead_latent_fraction": dead_frac}
                         | ({"val/alive_latent_jaccard": alive_jaccard} if alive_jaccard is not None else {}),
                         step=step,
@@ -607,15 +648,28 @@ def run_sae_training(
                         f"n_latents_shortcut_suspect={negtier_stats['n_latents_shortcut_suspect']:.0f}"
                     )
                 if wandb_run is not None:
-                    wandb_run.log(
-                        {
-                            f"collapse_check/{section}/{key}/{metric}": value
-                            for section, section_stats in collapse_stats.items()
-                            for key, key_stats in section_stats.items()
-                            for metric, value in key_stats.items()
-                        },
-                        step=step,
-                    )
+                    collapse_check_steps.append(step)
+                    # Tidy long-format table: sortable/filterable across every section/key/metric
+                    # at once, instead of scattered across dozens of dynamically-named panels.
+                    summary_table = wandb.Table(columns=["section", "key", "metric", "value"])
+                    log_payload = {}
+                    for section, section_stats in collapse_stats.items():
+                        history = collapse_trend_history[section]
+                        trend_metric = _COLLAPSE_TREND_METRIC[section]
+                        for key, key_stats in section_stats.items():
+                            for metric, value in key_stats.items():
+                                summary_table.add_data(section, key, metric, value)
+                            history.setdefault(key, []).append(key_stats[trend_metric])
+                        if history:
+                            log_payload[f"collapse_check/{section}_trend"] = wandb.plot.line_series(
+                                xs=collapse_check_steps,
+                                ys=list(history.values()),
+                                keys=list(history.keys()),
+                                title=f"{section} — {trend_metric}",
+                                xname="step",
+                            )
+                    log_payload["collapse_check/summary"] = summary_table
+                    wandb_run.log(log_payload, step=step)
 
             if residue_dominance_sequences is not None and (
                 step % config.collapse_check_interval_steps == 0 or step == config.total_steps
