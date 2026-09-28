@@ -41,15 +41,15 @@ The on-demand retrieval and caching of an individual Activation Shard from the R
 _Avoid_: Lazy loading, dataset fetch, pre-downloading
 
 ### Chemical Stratum
-The chemical amino acid class defining the evaluation denominator for an SAE feature (e.g., `serine_threonine`, `lysine`, `asparagine`, `cysteine`, `arginine`, `tyrosine`). Statistical enrichment is calculated strictly within stratum to guard against Residue Collapse.
+The chemical amino acid class defining the evaluation denominator for an SAE feature (short codes `K`, `ST`, `N`, `C`, `R`, `Y`, `E`, `M`, `W`, `Q` — not full English words). Statistical enrichment is calculated strictly within stratum to guard against Residue Collapse.
 _Avoid_: Amino acid group, target residue class
 
 ### Corpus Partition
-The 3-way partition hierarchy (`discovery_train`, `discovery_val`, and `held_out`) assigned by clustering protein sequences at 50% sequence identity to prevent homology leakage. SAE dictionaries are trained strictly on `discovery_train` (~70% of tokens), hyperparameter tuning and TopK/L1 sparsity ablations are performed on `discovery_val` (~10% of tokens), and `held_out` (~20% of tokens) is strictly reserved as an unbiased non-homologous benchmark.
+The 3-way partition hierarchy (`discovery_train`, `discovery_val`, and `held_out`) assigned by clustering protein sequences at 40% sequence identity (CD-HIT) to prevent homology leakage. SAE dictionaries are trained strictly on `discovery_train` (~70% of tokens), hyperparameter tuning and TopK/L1 sparsity ablations are performed on `discovery_val` (~10% of tokens), and `held_out` (~20% of tokens) is strictly reserved as an unbiased non-homologous benchmark.
 _Avoid_: Train/test split, data fold
 
 ### Negative Tier
-The confidence classification of an unmodified residue: `verified` (experimentally proven non-modified), `hard` (unmodified residue in the same stratum on a modified protein), or `background` (unannotated candidate in the proteome).
+The confidence classification of an unmodified residue: `gold` (experimentally proven non-modified), `hard` (unmodified residue in the same stratum on a modified protein), or `background` (unannotated candidate in the proteome).
 _Avoid_: Negative sample, control token
 
 ### Ambiguity Mask
@@ -57,7 +57,7 @@ A per-type boolean exclusion flag marking residues where mass spectrometry pepti
 _Avoid_: Dropout mask, ignore flag
 
 ### Homology Cluster
-A group of protein sequences clustered at 50% sequence identity (via MMseqs2 or CD-HIT). The cluster is the indivisible atomic unit of dataset partitioning: all proteins in a cluster are assigned to either `discovery` or `held_out` to prevent homology leakage.
+A group of protein sequences clustered at 40% sequence identity (via CD-HIT). The cluster is the indivisible atomic unit of dataset partitioning: all proteins in a cluster are assigned to either `discovery` or `held_out` to prevent homology leakage.
 _Avoid_: Family group, sequence bucket
 
 ### Corpus Definition
