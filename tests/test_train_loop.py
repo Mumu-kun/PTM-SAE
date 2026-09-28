@@ -4,6 +4,8 @@ SafeTensors fixtures (no network, no real ESM-2 activations)."""
 import json
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import safetensors.torch
 import torch
 
@@ -28,7 +30,9 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
             torch.randn(10, HIDDEN_DIM),  # proteinC: discovery_val
         ]
     )
-    safetensors.torch.save_file({"activations": shard}, cache_dir / "shard_0000.safetensors")
+    safetensors.torch.save_file(
+        {"activations": shard}, cache_dir / "shard_0000.safetensors"
+    )
 
     manifest = {
         "version": "1.0",
@@ -62,34 +66,78 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
         json.dump(manifest, f)
 
     partitions = [
-        {"uniprot_id": "proteinA", "partition": "discovery_train", "sequence": "A" * 20},
-        {"uniprot_id": "proteinB", "partition": "discovery_train", "sequence": "A" * 15},
+        {
+            "uniprot_id": "proteinA",
+            "partition": "discovery_train",
+            "sequence": "A" * 20,
+        },
+        {
+            "uniprot_id": "proteinB",
+            "partition": "discovery_train",
+            "sequence": "A" * 15,
+        },
         # Sequence deliberately matches the positions used by `_write_rich_ptm_sites` below:
         # 1:K 2:K 3:S 4:S 5:S 6:T 7-10:A.
-        {"uniprot_id": "proteinC", "partition": "discovery_val", "sequence": "KKSSSTAAAA"},
+        {
+            "uniprot_id": "proteinC",
+            "partition": "discovery_val",
+            "sequence": "KKSSSTAAAA",
+        },
+        # held_out: never read by anything the training-time canaries touch.
+        {"uniprot_id": "proteinD", "partition": "held_out", "sequence": "K"},
     ]
-    with open(corpus_dir / "proteins.jsonl", "w", encoding="utf-8") as f:
-        f.writelines(json.dumps(p) + "\n" for p in partitions)
+    pq.write_table(pa.Table.from_pylist(partitions), corpus_dir / "corpus.parquet")
 
     return cache_dir, corpus_dir
 
 
 def _write_rich_ptm_sites(corpus_dir: Path) -> None:
-    """A discovery_val label set covering all three collapse-check breakdowns: two strata, a
-    multi-label residue (position 5 carries two PTM types), and both a `hard` and a `verified`
-    negative — plus one held_out site that must never be touched by the training-time canary."""
-    sites = [
-        {"uniprot_id": "proteinC", "position": 1, "residue": "K", "stratum": "lysine", "ptm_types": ["ubiquitination"], "partition": "discovery_val"},
-        {"uniprot_id": "proteinC", "position": 2, "residue": "K", "stratum": "lysine", "ptm_types": [], "partition": "discovery_val"},
-        {"uniprot_id": "proteinC", "position": 3, "residue": "S", "stratum": "serine_threonine", "ptm_types": ["phosphorylation"], "partition": "discovery_val"},
-        {"uniprot_id": "proteinC", "position": 4, "residue": "S", "stratum": "serine_threonine", "ptm_types": [], "negative_tier": "hard", "partition": "discovery_val"},
-        {"uniprot_id": "proteinC", "position": 5, "residue": "S", "stratum": "serine_threonine", "ptm_types": ["phosphorylation", "glycosylation"], "partition": "discovery_val"},
-        {"uniprot_id": "proteinC", "position": 6, "residue": "T", "stratum": "serine_threonine", "ptm_types": [], "negative_tier": "verified", "partition": "discovery_val"},
+    """A discovery_val positive-site set covering both collapse-check strata (`K`, `ST`) plus a
+    multi-label residue (position 5 carries two PTM types) — one row per (protein, position,
+    ptm_type). `negative_tier`s are no longer stored here: `load_discovery_val_labels` derives
+    them at query time by scanning `corpus.parquet`'s sequence for each stratum's unannotated
+    residues (positions 2, 4, 6 below all become automatic `hard` negatives, since proteinC
+    carries a positive of the same stratum elsewhere). Also includes one held_out site that must
+    never be touched by the training-time canary."""
+    rows = [
+        {
+            "uniprot_id": "proteinC",
+            "position": 1,
+            "stratum": "K",
+            "ptm_type": "ubiquitination",
+            "partition": "discovery_val",
+        },
+        {
+            "uniprot_id": "proteinC",
+            "position": 3,
+            "stratum": "ST",
+            "ptm_type": "phosphorylation",
+            "partition": "discovery_val",
+        },
+        {
+            "uniprot_id": "proteinC",
+            "position": 5,
+            "stratum": "ST",
+            "ptm_type": "phosphorylation",
+            "partition": "discovery_val",
+        },
+        {
+            "uniprot_id": "proteinC",
+            "position": 5,
+            "stratum": "ST",
+            "ptm_type": "glycosylation",
+            "partition": "discovery_val",
+        },
         # A held_out site must never be touched by the training-time canary.
-        {"uniprot_id": "proteinD", "position": 1, "residue": "K", "stratum": "lysine", "ptm_types": ["ubiquitination"], "partition": "held_out"},
+        {
+            "uniprot_id": "proteinD",
+            "position": 1,
+            "stratum": "K",
+            "ptm_type": "ubiquitination",
+            "partition": "held_out",
+        },
     ]
-    with open(corpus_dir / "ptm_sites.jsonl", "w", encoding="utf-8") as f:
-        f.writelines(json.dumps(s) + "\n" for s in sites)
+    pq.write_table(pa.Table.from_pylist(rows), corpus_dir / "labels_stratified.parquet")
 
 
 def test_topk_training_loop_runs_and_checkpoints(tmp_path):
@@ -232,9 +280,9 @@ def test_topk_training_loop_logs_tier2_diagnostics(tmp_path, capsys):
 
 
 def test_collapse_check_runs_end_to_end(tmp_path, capsys):
-    """Verify the opt-in Tier 3 Residue Collapse canary joins ptm_sites.jsonl to discovery_val
-    activations and logs all three breakdowns (by_stratum, by_ptm_type, by_negative_tier),
-    without touching held_out."""
+    """Verify the opt-in Tier 3 Residue Collapse canary joins labels_stratified.parquet to
+    discovery_val activations and logs all three breakdowns (by_stratum, by_ptm_type,
+    by_negative_tier), without touching held_out."""
     cache_dir, corpus_dir = _write_fixture(tmp_path)
     _write_rich_ptm_sites(corpus_dir)
     checkpoint_dir = tmp_path / "checkpoints"
@@ -261,9 +309,9 @@ def test_collapse_check_runs_end_to_end(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert result["final_step"] == 4
-    assert "by_stratum/lysine" in out
-    assert "by_ptm_type/serine_threonine__phosphorylation" in out
-    assert "by_negative_tier/serine_threonine" in out
+    assert "by_stratum/K" in out
+    assert "by_ptm_type/ST__phosphorylation" in out
+    assert "by_negative_tier/ST" in out
 
 
 def test_collapse_check_wandb_logging_runs_offline(tmp_path, monkeypatch):
@@ -331,20 +379,22 @@ def test_ptm_concentration_check_reports_three_sections(tmp_path):
     result = run_ptm_concentration_check(model, labels, config, torch.device("cpu"))
 
     assert set(result.keys()) == {"by_stratum", "by_ptm_type", "by_negative_tier"}
-    assert set(result["by_stratum"].keys()) == {"lysine", "serine_threonine"}
+    assert set(result["by_stratum"].keys()) == {"K", "ST"}
     assert set(result["by_ptm_type"].keys()) == {
-        "lysine__ubiquitination",
-        "serine_threonine__phosphorylation",
-        "serine_threonine__glycosylation",
+        "K__ubiquitination",
+        "ST__phosphorylation",
+        "ST__glycosylation",
     }
-    # Only "hard" negatives produce a shortcut-suspect flag; "verified" is tracked but not reported.
-    assert set(result["by_negative_tier"].keys()) == {"serine_threonine"}
-    assert result["by_negative_tier"]["serine_threonine"]["n_latents_shortcut_suspect"] >= 0
+    # Both strata carry a positive elsewhere on proteinC, so their unannotated same-stratum
+    # residues (positions 2, 4, 6) are automatically derived as `hard` negatives at query time;
+    # only `hard` negatives produce a shortcut-suspect flag.
+    assert set(result["by_negative_tier"].keys()) == {"K", "ST"}
+    assert result["by_negative_tier"]["ST"]["n_latents_shortcut_suspect"] >= 0
 
 
 def test_residue_dominance_check_runs_end_to_end(tmp_path, capsys):
     """Verify the opt-in, PTM-label-free Residue-Dominance Gate canary runs against
-    proteins.jsonl sequences alone and logs a collapse_rate."""
+    corpus.parquet sequences alone and logs a collapse_rate."""
     cache_dir, corpus_dir = _write_fixture(tmp_path)
     checkpoint_dir = tmp_path / "checkpoints"
 
@@ -401,7 +451,9 @@ def test_residue_dominance_accumulator_reports_valid_collapse_rate(tmp_path):
         corpus_dir=str(corpus_dir),
     )
 
-    stats = run_residue_dominance_check(model, sequences, config, torch.device("cpu"), top_k=3, threshold=0.7)
+    stats = run_residue_dominance_check(
+        model, sequences, config, torch.device("cpu"), top_k=3, threshold=0.7
+    )
 
     assert stats["n_latents"] == 16
     assert 0.0 <= stats["collapse_rate"] <= 1.0

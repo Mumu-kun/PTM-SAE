@@ -4,13 +4,13 @@ M9/M16): a latent is "residue-dominant" if a large share of its top-activating p
 `discovery_val` share one amino acid identity, i.e. it behaves like a generic residue-identity
 detector (Residue Collapse) rather than tracking anything more specific. Unlike
 `collapse_check.py`, this needs no PTM labels at all — only residue identity, already available
-from `proteins.jsonl`'s sequences — so it's cheaper and carries no held_out risk by construction.
+from `corpus.parquet`'s sequences — so it's cheaper and carries no held_out risk by construction.
 """
 
-import json
 import shutil
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import torch
 from huggingface_hub import hf_hub_download
 
@@ -31,13 +31,13 @@ def load_discovery_val_sequences(
     remote_corpus_subpath: str = "corpus",
     token: str | None = None,
 ) -> dict[str, str]:
-    """Loads `proteins.jsonl`, filtered to `discovery_val`, keyed by `uniprot_id -> sequence`.
+    """Loads `corpus.parquet`, filtered to `discovery_val`, keyed by `uniprot_id -> sequence`.
     Mirrors `training.dataset.load_partition_ids`'s local-cache-then-remote-hydrate pattern."""
-    local_path = Path(corpus_dir) / "proteins.jsonl"
+    local_path = Path(corpus_dir) / "corpus.parquet"
 
     if not local_path.exists() and remote_repo_id:
         resolved_token = resolve_hf_token(token)
-        remote_path = f"{remote_corpus_subpath.rstrip('/')}/proteins.jsonl"
+        remote_path = f"{remote_corpus_subpath.rstrip('/')}/corpus.parquet"
 
         def _download() -> str:
             return hf_hub_download(
@@ -53,20 +53,16 @@ def load_discovery_val_sequences(
 
     if not local_path.exists():
         raise FileNotFoundError(
-            f"proteins.jsonl not found locally at {local_path} or on remote repository "
+            f"corpus.parquet not found locally at {local_path} or on remote repository "
             f"{remote_repo_id}."
         )
 
-    sequences: dict[str, str] = {}
-    with open(local_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)
-            if record.get("partition") == "discovery_val":
-                sequences[record["uniprot_id"]] = record["sequence"]
-    return sequences
+    table = pq.read_table(local_path, columns=["uniprot_id", "sequence", "partition"])
+    return {
+        record["uniprot_id"]: record["sequence"]
+        for record in table.to_pylist()
+        if record.get("partition") == "discovery_val"
+    }
 
 
 class ResidueDominanceAccumulator:
@@ -76,14 +72,22 @@ class ResidueDominanceAccumulator:
     def __init__(self, d_hidden: int, top_k: int, device: torch.device):
         self.top_k = top_k
         self.values = torch.full((d_hidden, top_k), float("-inf"), device=device)
-        self.residue_codes = torch.full((d_hidden, top_k), -1, dtype=torch.long, device=device)
+        self.residue_codes = torch.full(
+            (d_hidden, top_k), -1, dtype=torch.long, device=device
+        )
 
     def update(self, latents: torch.Tensor, residue_codes: torch.Tensor) -> None:
         """`latents`: (L, d_hidden) raw activation values. `residue_codes`: (L,) long, amino-acid
         vocabulary index (0..NUM_RESIDUE_CLASSES-1)."""
-        combined_values = torch.cat([self.values, latents.t()], dim=1)  # (d_hidden, top_k + L)
+        combined_values = torch.cat(
+            [self.values, latents.t()], dim=1
+        )  # (d_hidden, top_k + L)
         combined_codes = torch.cat(
-            [self.residue_codes, residue_codes.unsqueeze(0).expand(self.values.shape[0], -1)], dim=1
+            [
+                self.residue_codes,
+                residue_codes.unsqueeze(0).expand(self.values.shape[0], -1),
+            ],
+            dim=1,
         )
         new_values, idx = torch.topk(combined_values, self.top_k, dim=1)
         self.values = new_values
@@ -91,7 +95,9 @@ class ResidueDominanceAccumulator:
 
     def finalize(self, threshold: float) -> dict[str, float]:
         valid = self.residue_codes >= 0
-        one_hot = torch.nn.functional.one_hot(self.residue_codes.clamp_min(0), NUM_RESIDUE_CLASSES)
+        one_hot = torch.nn.functional.one_hot(
+            self.residue_codes.clamp_min(0), NUM_RESIDUE_CLASSES
+        )
         one_hot = one_hot * valid.unsqueeze(-1)
         counts = one_hot.sum(dim=1).float()  # (d_hidden, NUM_RESIDUE_CLASSES)
         valid_counts = valid.sum(dim=1).clamp_min(1).float()  # (d_hidden,)

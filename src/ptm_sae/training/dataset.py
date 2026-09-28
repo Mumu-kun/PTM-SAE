@@ -2,12 +2,12 @@
 Corpus Partition (`discovery_train` or `discovery_val` — never `held_out`, which stays reserved
 for Member 2's final evaluation)."""
 
-import json
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
+import pyarrow.parquet as pq
 import torch
 from huggingface_hub import hf_hub_download
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
@@ -27,14 +27,14 @@ def load_partition_ids(
 ) -> set[str]:
     """Resolves the set of UniProt IDs assigned to the given Corpus Partition.
 
-    Reads the local proteins.jsonl if cached, otherwise hydrates it once from the
-    Remote Storage Authority (`<remote_corpus_subpath>/proteins.jsonl`).
+    Reads the local corpus.parquet if cached, otherwise hydrates it once from the
+    Remote Storage Authority (`<remote_corpus_subpath>/corpus.parquet`).
     """
-    local_path = Path(corpus_dir) / "proteins.jsonl"
+    local_path = Path(corpus_dir) / "corpus.parquet"
 
     if not local_path.exists() and remote_repo_id:
         resolved_token = resolve_hf_token(token)
-        remote_path = f"{remote_corpus_subpath.rstrip('/')}/proteins.jsonl"
+        remote_path = f"{remote_corpus_subpath.rstrip('/')}/corpus.parquet"
 
         def _download() -> str:
             return hf_hub_download(
@@ -50,27 +50,22 @@ def load_partition_ids(
 
     if not local_path.exists():
         raise FileNotFoundError(
-            f"proteins.jsonl not found locally at {local_path} or on remote repository {remote_repo_id}."
+            f"corpus.parquet not found locally at {local_path} or on remote repository {remote_repo_id}."
         )
 
-    partition_ids: set[str] = set()
-    with open(local_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)
-            if record.get("partition") == partition:
-                partition_ids.add(record["uniprot_id"])
-
-    return partition_ids
+    table = pq.read_table(local_path, columns=["uniprot_id", "partition"])
+    return {
+        record["uniprot_id"]
+        for record in table.to_pylist()
+        if record.get("partition") == partition
+    }
 
 
 class ActivationPartitionDataset(IterableDataset):
     """Streams individual ESM-2 residue activation vectors strictly from one Corpus Partition.
 
     Cross-references the activation shard manifest (proteins actually extracted) against the
-    Corpus Partition manifest (`proteins.jsonl`) to isolate exactly the requested partition,
+    Corpus Partition manifest (`corpus.parquet`) to isolate exactly the requested partition,
     then hydrates shards on demand via SafeTensorsReader. Shard order is reshuffled every epoch
     and rows are drawn from a bounded shuffle buffer for approximate i.i.d. sampling without
     materializing the full corpus in memory. Shards are striped evenly across DataLoader workers.
@@ -131,7 +126,7 @@ class ActivationPartitionDataset(IterableDataset):
         if not shard_entries:
             raise ValueError(
                 f"No {partition} activation entries found — check that the shard manifest "
-                "and proteins.jsonl partition manifest reference the same UniProt IDs."
+                "and corpus.parquet partition manifest reference the same UniProt IDs."
             )
 
         self.shard_entries = shard_entries
@@ -183,7 +178,9 @@ class ActivationPartitionDataset(IterableDataset):
                     for row in protein_acts.unbind(dim=0):
                         buffer.append(row)
                         if len(buffer) >= self.shuffle_buffer_size:
-                            idx = int(torch.randint(len(buffer), (1,), generator=row_rng))
+                            idx = int(
+                                torch.randint(len(buffer), (1,), generator=row_rng)
+                            )
                             buffer[idx], buffer[-1] = buffer[-1], buffer[idx]
                             yield buffer.pop()
 

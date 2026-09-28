@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import safetensors.torch
 import torch
 
@@ -75,13 +77,13 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
         json.dump(manifest, f)
 
     partitions = [
-        {"uniprot_id": "proteinA", "partition": "discovery_train"},
-        {"uniprot_id": "proteinB", "partition": "discovery_val"},
-        {"uniprot_id": "proteinC", "partition": "discovery_train"},
-        {"uniprot_id": "proteinD", "partition": "held_out"},
+        {"uniprot_id": "proteinA", "partition": "discovery_train", "sequence": "AAA"},
+        {"uniprot_id": "proteinB", "partition": "discovery_val", "sequence": "BB"},
+        {"uniprot_id": "proteinC", "partition": "discovery_train", "sequence": "CCCC"},
+        {"uniprot_id": "proteinD", "partition": "held_out", "sequence": "D"},
     ]
-    with open(corpus_dir / "proteins.jsonl", "w", encoding="utf-8") as f:
-        f.writelines(json.dumps(p) + "\n" for p in partitions)
+    table = pa.Table.from_pylist(partitions)
+    pq.write_table(table, corpus_dir / "corpus.parquet")
 
     return cache_dir, corpus_dir
 
@@ -110,7 +112,10 @@ def test_dataset_excludes_discovery_val_and_held_out(tmp_path):
     )
 
     assert dataset.total_tokens == 7
-    assert set(dataset.shard_files) == {"shard_0000.safetensors", "shard_0001.safetensors"}
+    assert set(dataset.shard_files) == {
+        "shard_0000.safetensors",
+        "shard_0001.safetensors",
+    }
 
     rows = list(dataset)
     assert len(rows) == 7

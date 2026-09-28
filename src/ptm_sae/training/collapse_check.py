@@ -17,14 +17,17 @@ handing off to that full evaluation, along three axes:
     almost as often as on real modifications — a shortcut-learning flag, not real chemistry?
 """
 
-import json
 import shutil
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import torch
 from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import HfHubHTTPError
 
+from ptm_sae.corpus.config import CFG
 from ptm_sae.extraction.hub import resolve_hf_token, retry_with_backoff
 from ptm_sae.extraction.reader import SafeTensorsReader
 
@@ -44,27 +47,31 @@ SHORTCUT_ACTIVITY_RATIO_THRESHOLD = 0.8
 class ResidueLabel:
     stratum: str
     ptm_types: frozenset[str]  # empty == unmodified
-    negative_tier: str | None  # "verified" / "hard" / "background" for negatives, else None
+    negative_tier: str | None  # "gold" / "hard" / "background" for negatives, else None
 
 
 StratumLabels = dict[str, dict[int, ResidueLabel]]
 
 
-def load_discovery_val_labels(
-    corpus_dir: str | Path,
-    remote_repo_id: str | None = None,
-    remote_corpus_subpath: str = "corpus",
-    token: str | None = None,
-) -> StratumLabels:
-    """Loads `ptm_sites.jsonl`, filtered to `discovery_val`, keyed by
-    `uniprot_id -> {position: ResidueLabel}`. Mirrors `training.dataset.load_partition_ids`'s
-    local-cache-then-remote-hydrate pattern.
+def _hydrate_corpus_parquet(
+    filename: str,
+    corpus_dir: Path,
+    remote_repo_id: str | None,
+    remote_corpus_subpath: str,
+    token: str | None,
+    required: bool,
+) -> Path | None:
+    """Ensures `filename` is cached locally under `corpus_dir`, hydrating it once from the
+    Remote Storage Authority (`<remote_corpus_subpath>/<filename>`) if absent. Mirrors
+    `training.dataset.load_partition_ids`'s local-cache-then-remote-hydrate pattern. Optional
+    artifacts (`required=False`) that genuinely don't exist yet upstream (a real corpus build
+    hasn't run yet) resolve to `None` instead of raising.
     """
-    local_path = Path(corpus_dir) / "ptm_sites.jsonl"
+    local_path = corpus_dir / filename
 
     if not local_path.exists() and remote_repo_id:
         resolved_token = resolve_hf_token(token)
-        remote_path = f"{remote_corpus_subpath.rstrip('/')}/ptm_sites.jsonl"
+        remote_path = f"{remote_corpus_subpath.rstrip('/')}/{filename}"
 
         def _download() -> str:
             return hf_hub_download(
@@ -74,30 +81,143 @@ def load_discovery_val_labels(
                 token=resolved_token,
             )
 
-        cached_file = retry_with_backoff(_download, max_retries=3, base_delay=2.0)
+        try:
+            cached_file = retry_with_backoff(_download, max_retries=3, base_delay=2.0)
+        except HfHubHTTPError:
+            if required:
+                raise
+            return None
         local_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(cached_file, local_path)
 
     if not local_path.exists():
+        if not required:
+            return None
         raise FileNotFoundError(
-            f"ptm_sites.jsonl not found locally at {local_path} or on remote repository "
+            f"{filename} not found locally at {local_path} or on remote repository "
             f"{remote_repo_id}."
         )
+    return local_path
+
+
+def load_discovery_val_labels(
+    corpus_dir: str | Path,
+    remote_repo_id: str | None = None,
+    remote_corpus_subpath: str = "corpus",
+    token: str | None = None,
+) -> StratumLabels:
+    """Loads `discovery_val` residue labels, keyed by `uniprot_id -> {position: ResidueLabel}`.
+
+    Positive (modified) residues come straight from `labels_stratified.parquet`. Negative
+    (unmodified) residues are derived at query time, not materialized to disk: for each chemical
+    stratum, every residue of that stratum's chemistry in a `discovery_val` protein's sequence
+    (`corpus.parquet`) that isn't already a positive or a masked/ambiguous site
+    (`exclusion_mask.parquet`, optional) becomes a negative, tiered `gold` (explicitly verified
+    unmodified, `gold_negatives_nglyco.parquet`, optional and currently N-glycosylation-only),
+    `hard` (the protein has >=1 positive site of that stratum elsewhere), or `background`
+    (otherwise). Mirrors `training.dataset.load_partition_ids`'s local-cache-then-remote-hydrate
+    pattern, one artifact at a time.
+    """
+    corpus_dir = Path(corpus_dir)
+
+    corpus_path = _hydrate_corpus_parquet(
+        "corpus.parquet",
+        corpus_dir,
+        remote_repo_id,
+        remote_corpus_subpath,
+        token,
+        required=True,
+    )
+    labels_path = _hydrate_corpus_parquet(
+        "labels_stratified.parquet",
+        corpus_dir,
+        remote_repo_id,
+        remote_corpus_subpath,
+        token,
+        required=True,
+    )
+    exclusion_path = _hydrate_corpus_parquet(
+        "exclusion_mask.parquet",
+        corpus_dir,
+        remote_repo_id,
+        remote_corpus_subpath,
+        token,
+        required=False,
+    )
+    gold_path = _hydrate_corpus_parquet(
+        "gold_negatives_nglyco.parquet",
+        corpus_dir,
+        remote_repo_id,
+        remote_corpus_subpath,
+        token,
+        required=False,
+    )
+
+    corpus_rows = pq.read_table(
+        corpus_path, columns=["uniprot_id", "sequence", "partition"]
+    ).to_pylist()
+    val_sequences = {
+        row["uniprot_id"]: row["sequence"]
+        for row in corpus_rows
+        if row.get("partition") == "discovery_val"
+    }
+
+    ptm_types_by_position: dict[str, dict[int, set[str]]] = defaultdict(
+        lambda: defaultdict(set)
+    )
+    stratum_by_position: dict[str, dict[int, str]] = defaultdict(dict)
+    for row in pq.read_table(labels_path).to_pylist():
+        if row.get("partition") != "discovery_val":
+            continue
+        uniprot_id, position = row["uniprot_id"], row["position"]
+        ptm_types_by_position[uniprot_id][position].add(row["ptm_type"])
+        stratum_by_position[uniprot_id][position] = row["stratum"]
+
+    excluded_positions: dict[str, set[int]] = defaultdict(set)
+    if exclusion_path is not None:
+        for row in pq.read_table(exclusion_path).to_pylist():
+            excluded_positions[row["uniprot_id"]].add(row["position"])
+
+    gold_positions: dict[str, set[int]] = defaultdict(set)
+    if gold_path is not None:
+        for row in pq.read_table(gold_path).to_pylist():
+            gold_positions[row["uniprot_id"]].add(row["position"])
 
     labels: StratumLabels = {}
-    with open(local_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)
-            if record.get("partition") != "discovery_val":
-                continue
-            labels.setdefault(record["uniprot_id"], {})[record["position"]] = ResidueLabel(
-                stratum=record["stratum"],
-                ptm_types=frozenset(record.get("ptm_types") or []),
-                negative_tier=record.get("negative_tier"),
+    for uniprot_id, sequence in val_sequences.items():
+        protein_strata = stratum_by_position.get(uniprot_id, {})
+        protein_ptm_types = ptm_types_by_position.get(uniprot_id, {})
+        protein_excluded = excluded_positions.get(uniprot_id, set())
+        protein_gold = gold_positions.get(uniprot_id, set())
+
+        position_labels: dict[int, ResidueLabel] = {
+            position: ResidueLabel(
+                stratum=stratum,
+                ptm_types=frozenset(protein_ptm_types.get(position, ())),
+                negative_tier=None,
             )
+            for position, stratum in protein_strata.items()
+        }
+
+        for stratum, residues in CFG.stratum_residues.items():
+            stratum_has_positive = stratum in protein_strata.values()
+            for idx, residue in enumerate(sequence):
+                position = idx + 1
+                if residue not in residues:
+                    continue
+                if position in position_labels or position in protein_excluded:
+                    continue
+                if position in protein_gold:
+                    tier = "gold"
+                elif stratum_has_positive:
+                    tier = "hard"
+                else:
+                    tier = "background"
+                position_labels[position] = ResidueLabel(
+                    stratum=stratum, ptm_types=frozenset(), negative_tier=tier
+                )
+
+        labels[uniprot_id] = position_labels
     return labels
 
 
@@ -151,8 +271,12 @@ class PTMConcentrationAccumulator:
         self.total_count.index_add_(0, sel_stratum, ones)
         self.active_count.index_add_(0, sel_stratum, sel_active)
         if sel_modified.any():
-            self.total_modified_count.index_add_(0, sel_stratum[sel_modified], ones[sel_modified])
-            self.active_modified_count.index_add_(0, sel_stratum[sel_modified], sel_active[sel_modified])
+            self.total_modified_count.index_add_(
+                0, sel_stratum[sel_modified], ones[sel_modified]
+            )
+            self.active_modified_count.index_add_(
+                0, sel_stratum[sel_modified], sel_active[sel_modified]
+            )
 
     def update_ptm_pairs(
         self, active: torch.Tensor, pair_ids: torch.Tensor, residue_idx: torch.Tensor
@@ -167,7 +291,9 @@ class PTMConcentrationAccumulator:
         self.total_positive_count.index_add_(0, pair_ids, ones)
         self.active_positive_count.index_add_(0, pair_ids, sel_active)
 
-    def update_negative_tier(self, active: torch.Tensor, negtier_id: torch.Tensor) -> None:
+    def update_negative_tier(
+        self, active: torch.Tensor, negtier_id: torch.Tensor
+    ) -> None:
         """`negtier_id`: (L,) long, -1 for residues with no negative_tier (positives)."""
         mask = negtier_id >= 0
         if not mask.any():
@@ -194,12 +320,15 @@ class PTMConcentrationAccumulator:
                 continue
 
             active_modified_rate = (
-                self.active_modified_count[i, has_activity] / self.active_count[i, has_activity]
+                self.active_modified_count[i, has_activity]
+                / self.active_count[i, has_activity]
             )
             ratio = active_modified_rate / base_rate
             results[stratum] = {
                 "mean_concentration_ratio": ratio.mean().item(),
-                "n_latents_above_2x_baseline": float((ratio > BASELINE_RATIO_THRESHOLD).sum().item()),
+                "n_latents_above_2x_baseline": float(
+                    (ratio > BASELINE_RATIO_THRESHOLD).sum().item()
+                ),
                 "n_active_latents": float(has_activity.sum().item()),
             }
         return results
@@ -223,23 +352,28 @@ class PTMConcentrationAccumulator:
                 continue
 
             active_positive_rate = (
-                self.active_positive_count[p, has_activity] / self.active_count[stratum_idx, has_activity]
+                self.active_positive_count[p, has_activity]
+                / self.active_count[stratum_idx, has_activity]
             )
             ratio = active_positive_rate / base_rate
             best_ratio = ratio.max().item()
             n_near_best = (
-                float((ratio > NEAR_BEST_RATIO_THRESHOLD * best_ratio).sum().item()) if best_ratio > 0 else 0.0
+                float((ratio > NEAR_BEST_RATIO_THRESHOLD * best_ratio).sum().item())
+                if best_ratio > 0
+                else 0.0
             )
             results[key] = {
                 "mean_concentration_ratio": ratio.mean().item(),
-                "n_latents_above_2x_baseline": float((ratio > BASELINE_RATIO_THRESHOLD).sum().item()),
+                "n_latents_above_2x_baseline": float(
+                    (ratio > BASELINE_RATIO_THRESHOLD).sum().item()
+                ),
                 "best_latent_ratio": best_ratio,
                 "n_latents_near_best": n_near_best,
             }
         return results
 
     def finalize_negative_tier(self) -> dict[str, dict[str, float]]:
-        """Only `hard` negatives produce a shortcut-suspect flag — `verified`/`background`
+        """Only `hard` negatives produce a shortcut-suspect flag — `gold`/`background`
         negatives aren't curated to resemble modified residues, so a latent distinguishing
         those from real modifications proves nothing about shortcut learning."""
         results: dict[str, dict[str, float]] = {}
@@ -256,7 +390,8 @@ class PTMConcentrationAccumulator:
                 continue
 
             active_modified_rate = (
-                self.active_modified_count[stratum_idx, has_activity] / self.active_count[stratum_idx, has_activity]
+                self.active_modified_count[stratum_idx, has_activity]
+                / self.active_count[stratum_idx, has_activity]
             )
             concentration_ratio = active_modified_rate / base_rate
             high_concentration = concentration_ratio > BASELINE_RATIO_THRESHOLD
@@ -264,13 +399,18 @@ class PTMConcentrationAccumulator:
             total_hard = max(1.0, self.total_negtier_count[t].item())
             total_modified = max(1.0, self.total_modified_count[stratum_idx].item())
             rate_hard = self.active_negtier_count[t, has_activity] / total_hard
-            rate_modified = self.active_modified_count[stratum_idx, has_activity] / total_modified
+            rate_modified = (
+                self.active_modified_count[stratum_idx, has_activity] / total_modified
+            )
             cant_tell_apart = (rate_modified > 0) & (
-                (rate_hard / rate_modified.clamp_min(1e-8)) > SHORTCUT_ACTIVITY_RATIO_THRESHOLD
+                (rate_hard / rate_modified.clamp_min(1e-8))
+                > SHORTCUT_ACTIVITY_RATIO_THRESHOLD
             )
 
             results[stratum] = {
-                "n_latents_shortcut_suspect": float((high_concentration & cant_tell_apart).sum().item())
+                "n_latents_shortcut_suspect": float(
+                    (high_concentration & cant_tell_apart).sum().item()
+                )
             }
         return results
 
@@ -282,14 +422,26 @@ def run_ptm_concentration_check(
     """One pass over labeled discovery_val proteins, read directly via SafeTensorsReader
     (bypassing the shuffled training DataLoader — order doesn't matter here). Returns
     `{"by_stratum": ..., "by_ptm_type": ..., "by_negative_tier": ...}`."""
-    all_labels = [label for positions in labels.values() for label in positions.values()]
+    all_labels = [
+        label for positions in labels.values() for label in positions.values()
+    ]
     strata = sorted({label.stratum for label in all_labels})
     if not strata:
         return {"by_stratum": {}, "by_ptm_type": {}, "by_negative_tier": {}}
 
-    ptm_pairs = sorted({(label.stratum, ptm_type) for label in all_labels for ptm_type in label.ptm_types})
+    ptm_pairs = sorted(
+        {
+            (label.stratum, ptm_type)
+            for label in all_labels
+            for ptm_type in label.ptm_types
+        }
+    )
     negtier_pairs = sorted(
-        {(label.stratum, label.negative_tier) for label in all_labels if label.negative_tier is not None}
+        {
+            (label.stratum, label.negative_tier)
+            for label in all_labels
+            if label.negative_tier is not None
+        }
     )
 
     model.eval()
@@ -299,7 +451,9 @@ def run_ptm_concentration_check(
         remote_subpath=config.remote_subpath,
         max_cached_shards=config.max_cached_shards,
     )
-    accumulator = PTMConcentrationAccumulator(strata, ptm_pairs, negtier_pairs, config.d_hidden, device)
+    accumulator = PTMConcentrationAccumulator(
+        strata, ptm_pairs, negtier_pairs, config.d_hidden, device
+    )
     try:
         for uniprot_id, position_labels in labels.items():
             if uniprot_id not in reader.entries:
@@ -320,9 +474,13 @@ def run_ptm_concentration_check(
                 stratum_id[idx] = accumulator.stratum_to_id[label.stratum]
                 is_modified[idx] = bool(label.ptm_types)
                 if label.negative_tier is not None:
-                    negtier_id[idx] = accumulator.negtier_pair_to_id[(label.stratum, label.negative_tier)]
+                    negtier_id[idx] = accumulator.negtier_pair_to_id[
+                        (label.stratum, label.negative_tier)
+                    ]
                 for ptm_type in label.ptm_types:
-                    pair_ids.append(accumulator.ptm_pair_to_id[(label.stratum, ptm_type)])
+                    pair_ids.append(
+                        accumulator.ptm_pair_to_id[(label.stratum, ptm_type)]
+                    )
                     pair_residue_idx.append(idx)
 
             out = model(activations)

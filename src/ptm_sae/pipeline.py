@@ -1,35 +1,81 @@
 """Complete end-to-end PTM-SAE lifecycle pipeline orchestrator.
 
 Coordinates:
-1. Data Acquisition (fetch UniProt proteome & raw PTM datasets).
-2. Preparation & Splitting (homology partitioning & invariant validation).
+1. Corpus Resolution (resolve the FASTA/protein set extraction will run over).
+2. Protein Construction (build the `Protein` list `run_extraction_pipeline` consumes).
 3. PLM Extraction (batched residue-level extraction & SafeTensors sharded buffering).
-4. Remote Synchronization (resilient Hugging Face Hub atomic commits).
+4. Remote Synchronization (resilient Hugging Face Hub status report).
 5. Verification (zero-copy readback sanity checks).
+
+Corpus-building itself (CD-HIT clustering + the PTM label cascade) no longer runs in-process
+here -- it runs standalone as a Kaggle job (`ptm_sae.corpus.pipeline`, via `scripts/build_corpus.py`)
+and publishes `corpus.parquet`/`labels_stratified.parquet`/etc. to the HF Hub. The non-sample path
+below reads that already-published corpus (via `training.dataset.load_partition_ids`'s
+local-cache-then-remote-hydrate pattern) instead of re-deriving one (implementation plan, Stage 4,
+decision 7). `sample_only=True` never built a corpus this way either -- it only ever parsed
+`data/sample.fasta` directly -- so that path is unaffected, just no longer routed through a
+now-retired middleman.
 """
 
 import argparse
-from collections.abc import Sequence
 from pathlib import Path
 
+import pyarrow.parquet as pq
+
 from ptm_sae.config import PipelineConfig
-from ptm_sae.data import (
-    PTMCorpus,
-    fetch_cplm_human,
-    fetch_uniprot_human_proteome,
-    fetch_uniprot_ptm_features,
-    prepare_ptm_corpus,
-)
-from ptm_sae.extraction.hub import HfSyncClient, resolve_hf_token
+from ptm_sae.data import parse_uniprot_fasta
+from ptm_sae.data.schema import Protein
+from ptm_sae.extraction.hub import resolve_hf_token
 from ptm_sae.extraction.pipeline import run_extraction_pipeline
 from ptm_sae.extraction.progress import PipelineProgressManager
 from ptm_sae.extraction.reader import SafeTensorsReader
+from ptm_sae.training.dataset import load_partition_ids
+
+
+def _load_published_corpus_proteins(
+    corpus_dir: Path,
+    remote_repo_id: str | None,
+    remote_corpus_subpath: str,
+    token: str | None,
+) -> list[Protein]:
+    """Resolves the `discovery_train` + `discovery_val` protein set from an already-published
+    `corpus.parquet` (never `held_out`, reserved for Member 2). Reuses `load_partition_ids` for
+    the ID set -- which hydrates `corpus.parquet` locally as a side effect -- then reads the
+    corresponding rows directly for `sequence`/`length`/`partition`.
+    """
+    train_ids = load_partition_ids(
+        "discovery_train",
+        corpus_dir=corpus_dir,
+        remote_repo_id=remote_repo_id,
+        remote_corpus_subpath=remote_corpus_subpath,
+        token=token,
+    )
+    val_ids = load_partition_ids(
+        "discovery_val",
+        corpus_dir=corpus_dir,
+        remote_repo_id=remote_repo_id,
+        remote_corpus_subpath=remote_corpus_subpath,
+        token=token,
+    )
+    needed_ids = train_ids | val_ids
+
+    corpus_path = corpus_dir / "corpus.parquet"
+    table = pq.read_table(corpus_path, columns=["uniprot_id", "sequence", "partition"])
+    return [
+        Protein(
+            uniprot_id=row["uniprot_id"],
+            sequence=row["sequence"],
+            length=len(row["sequence"]),
+            partition=row["partition"],
+        )
+        for row in table.to_pylist()
+        if row["uniprot_id"] in needed_ids
+    ]
 
 
 def run_full_lifecycle(
     config: PipelineConfig,
     fasta_path: str | Path | None = None,
-    ptm_sources: Sequence[Path] | None = None,
     sample_only: bool = False,
     max_proteins: int | None = None,
     remote_repo_id: str | None = None,
@@ -37,12 +83,15 @@ def run_full_lifecycle(
     token: str | None = None,
     progress_manager: PipelineProgressManager | None = None,
 ) -> dict:
-    """Executes the entire data acquisition, extraction, and remote synchronization lifecycle:
+    """Executes the extraction-and-synchronization lifecycle:
 
-    1. Data Acquisition: Downloads reviewed human proteome and raw PTM annotations.
-    2. Harmonization & Partitioning: Parses sequences, clusters homology groups, and solves MILP split.
+    1. Resolve Proteins: locates the local FASTA to parse (`sample_only`/`fasta_path`) or the
+       already-published `corpus.parquet` to read from.
+    2. Build Protein Records: parses the FASTA, or reads `discovery_train`+`discovery_val` rows
+       straight out of the published corpus -- never `held_out`, reserved for Member 2.
     3. ESM-2 Activation Extraction: Batched extraction across single/multi-GPU into SafeTensors shards.
-    4. Remote Upload: Pushes shards, auxiliary context, and manifests to structured HF Hub subpaths.
+    4. Remote Sync Status: Reports whether extraction shards synced to the HF Hub (done
+       asynchronously by the sharder itself during stage 3, not re-uploaded here).
     5. Readback Verification: Validates zero-copy indexing and biological coordinate invariants.
     """
     pm = progress_manager or PipelineProgressManager()
@@ -57,82 +106,68 @@ def run_full_lifecycle(
     config.sharding.remote_repo_id = resolved_repo
     config.sharding.remote_subpath = resolved_subpath
 
-    # 1. Data acquisition and FASTA resolution
-    pm.start_stage(1, total_items=1, info="Resolving proteome & PTM sources")
+    # 1. Resolve either a local FASTA (sample/pilot runs) or the published corpus location
+    pm.start_stage(1, total_items=1, info="Resolving proteins for extraction")
 
-    if sample_only:
-        resolved_fasta = Path("data/sample.fasta")
-    elif fasta_path:
-        resolved_fasta = Path(fasta_path)
+    use_local_fasta = sample_only or fasta_path is not None
+    if use_local_fasta:
+        resolved_fasta = Path("data/sample.fasta") if sample_only else Path(fasta_path)
+        if not resolved_fasta.exists():
+            raise FileNotFoundError(f"FASTA file not found at {resolved_fasta}")
+        pm.finish_stage(1, summary=f"Resolved local FASTA: {resolved_fasta.name}")
     else:
-        resolved_fasta = fetch_uniprot_human_proteome(out_dir="data/raw")
+        pm.finish_stage(
+            1,
+            summary=f"Resolving published corpus at {processed_path} (repo={resolved_repo})",
+        )
 
-    if not resolved_fasta.exists():
-        raise FileNotFoundError(f"FASTA file not found at {resolved_fasta}")
+    # 2. Build the Protein records run_extraction_pipeline consumes
+    pm.start_stage(2, total_items=1, info="Building Protein records")
 
-    resolved_ptm_sources = list(ptm_sources) if ptm_sources else []
-    if not resolved_ptm_sources and not sample_only:
-        uniprot_ptm = fetch_uniprot_ptm_features(output_dir="data/raw")
-        cplm_ptm = fetch_cplm_human(output_dir="data/raw")
-        resolved_ptm_sources = [uniprot_ptm, cplm_ptm]
+    if use_local_fasta:
+        target_proteins, skipped = parse_uniprot_fasta(
+            resolved_fasta, max_sequence_length=config.extraction.max_sequence_length
+        )
+        pm.finish_stage(
+            2,
+            summary=f"{len(target_proteins)} proteins parsed from {resolved_fasta.name} "
+            f"({len(skipped)} skipped, length-exceeded)",
+        )
+    else:
+        target_proteins = _load_published_corpus_proteins(
+            corpus_dir=processed_path,
+            remote_repo_id=resolved_repo,
+            remote_corpus_subpath="corpus",
+            token=token,
+        )
+        pm.finish_stage(
+            2,
+            summary=f"{len(target_proteins)} proteins resolved (discovery_train + "
+            "discovery_val) from published corpus.parquet",
+        )
 
-    pm.finish_stage(
-        1,
-        summary=f"Proteome: {resolved_fasta.name} | PTM datasets: {len(resolved_ptm_sources)} sources",
-    )
-
-    # 2. Harmonization, invariant validation and exact MILP partitioning
-    pm.start_stage(2, total_items=1, info="Harmonization & exact MILP partitioning")
-
-    corpus: PTMCorpus = prepare_ptm_corpus(
-        fasta_path=resolved_fasta,
-        ptm_sources=resolved_ptm_sources,
-        split_ratio=0.8,
-        max_seq_length=config.extraction.max_sequence_length,
-        output_dir=processed_path,
-    )
-
-    pm.finish_stage(
-        2,
-        summary=f"{corpus.total_proteins} proteins ({len(corpus.discovery_proteins)} discovery, {len(corpus.held_out_proteins)} held-out) | {corpus.total_sites} valid sites",
-    )
-
-    # 3. ESM-2 activation extraction and sharded buffering
-    target_proteins = corpus.all_proteins if sample_only else corpus.discovery_proteins
     if max_proteins is not None:
         target_proteins = target_proteins[:max_proteins]
 
+    # 3. ESM-2 activation extraction and sharded buffering
     sharding_manifest = run_extraction_pipeline(
         config=config,
         proteins=target_proteins,
         progress_manager=pm,
     )
 
-    # 4. Structured remote hub synchronization and provenance upload
+    # 4. Remote hub sync status (shard/manifest upload itself already ran asynchronously,
+    # inside stage 3, via SafeTensorsSharder's own HfSyncClient)
     resolved_token = resolve_hf_token(token)
 
     if resolved_repo and resolved_token:
-        pm.start_stage(4, total_items=4, info=f"Pushing provenance to {resolved_repo}")
-        hub = HfSyncClient(token=resolved_token)
-
-        corpus_subpath = "corpus"
-        meta_files = (
-            processed_path / "split_manifest.json",
-            processed_path / "proteins.jsonl",
-            processed_path / "ptm_sites.jsonl",
-            processed_path / "mismatch_audit.tsv",
+        pm.start_stage(
+            4, total_items=1, info=f"Extraction shards synced to {resolved_repo}"
         )
-        uploaded = 0
-        for meta_file in meta_files:
-            if meta_file.exists():
-                res = hub.upload_shard(resolved_repo, corpus_subpath, meta_file)
-                if res is not None:
-                    uploaded += 1
-            pm.advance(1)
-
         pm.finish_stage(
             4,
-            summary=f"Provenance committed to {resolved_repo} ({uploaded} committed, {len(meta_files) - uploaded} skipped up-to-date)",
+            summary=f"Extraction shards synced to {resolved_repo} during stage 3 "
+            "(asynchronous background upload).",
         )
     elif resolved_repo and not resolved_token:
         pm.start_stage(
@@ -179,7 +214,7 @@ def run_full_lifecycle(
     pm.print("═" * 72)
 
     return {
-        "corpus_manifest": corpus.manifest,
+        "protein_count": len(target_proteins),
         "sharding_manifest": sharding_manifest,
         "output_dir": config.sharding.output_dir,
         "processed_dir": str(processed_path),
@@ -190,7 +225,7 @@ def run_full_lifecycle(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Full Lifecycle Pipeline (Download -> Partition -> Extract -> Upload)"
+        description="Run Full Lifecycle Pipeline (Resolve Corpus -> Extract -> Sync -> Verify)"
     )
     parser.add_argument(
         "--config",
@@ -202,13 +237,7 @@ def main():
         "--fasta",
         type=str,
         default=None,
-        help="Path to FASTA file (downloads human proteome if omitted)",
-    )
-    parser.add_argument(
-        "--ptm-source",
-        action="append",
-        default=None,
-        help="Path(s) to raw PTM files (PhosphoSitePlus, CPLM, dbPTM, etc.). Automatically defaults to Tier 1 datasets (UniProt + CPLM) if omitted.",
+        help="Path to a local FASTA file to extract directly, bypassing the published corpus",
     )
     parser.add_argument(
         "--sample-only",
@@ -248,7 +277,6 @@ def main():
     run_full_lifecycle(
         config=cfg,
         fasta_path=args.fasta,
-        ptm_sources=args.ptm_source,
         sample_only=args.sample_only,
         max_proteins=args.max_proteins,
         remote_repo_id=args.remote_repo,
