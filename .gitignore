@@ -37,3 +37,7 @@ build/
 old/
 scratch/
 .scratch/
+
+# Notebook-generated diagnostic figures (re-created per run, not committed)
+notebooks/*_figures/
+notebooks/executed_*.ipynb

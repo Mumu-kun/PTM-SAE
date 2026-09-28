@@ -27,10 +27,15 @@ class SAETrainingConfig(BaseModel):
     d_in: int = 1280
     d_hidden: int = 4096
     k: int = 32  # TopK / BatchTopK only
-    bandwidth: float = 1e-3  # JumpReLU only
+    bandwidth: float = 2.0  # JumpReLU only (Anthropic 2025 tanh+pre-act recipe's STE bandwidth)
     init_threshold: float = 0.001  # JumpReLU only
-    l0_coefficient: float | None = None  # JumpReLU only — required if sae_type == "jumprelu"
-    l0_warmup_steps: int = 10_000  # JumpReLU only (Rajamanoharan et al., 2024: 10k steps / 40M tokens)
+    # JumpReLU only (Anthropic circuits update, Jan 2025: tanh+pre-act loss, replacing the
+    # original L0-pseudo-count loss, which is reported to need ~2B tokens to reliably converge).
+    # sparsity_coefficient has no safe default — it trades off directly against reconstruction
+    # fidelity and must be swept per dataset (required if sae_type == "jumprelu").
+    sparsity_coefficient: float | None = None
+    sparsity_tanh_c: float = 4.0
+    preact_coefficient: float = 3e-6
     l1_coefficient: float | None = None  # Gated only — required if sae_type == "gated"
 
     # AuxK dead-latent mitigation (TopK / BatchTopK only). None means "use that architecture's
@@ -100,9 +105,9 @@ class SAETrainingConfig(BaseModel):
     wandb: WandbConfig = Field(default_factory=WandbConfig)
 
     def model_post_init(self, __context) -> None:
-        if self.sae_type == "jumprelu" and self.l0_coefficient is None:
+        if self.sae_type == "jumprelu" and self.sparsity_coefficient is None:
             raise ValueError(
-                "l0_coefficient must be set explicitly for sae_type='jumprelu' — "
+                "sparsity_coefficient must be set explicitly for sae_type='jumprelu' — "
                 "it is the reconstruction/sparsity tradeoff knob and has no safe default."
             )
         if self.sae_type == "gated" and self.l1_coefficient is None:

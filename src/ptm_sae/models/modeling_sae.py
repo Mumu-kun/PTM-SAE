@@ -104,8 +104,13 @@ class SAEPreTrainedModel(PreTrainedModel):
         """Seeds `b_dec` from the geometric median of `sample_batch` (shape (n_tokens, d_in)),
         instead of leaving it at zero. Standard SAE practice (Anthropic's *Towards
         Monosemanticity*; Gao et al., 2024) — call once, right after construction and before
-        the optimizer exists, on a throwaway sample of real activations."""
-        self.b_dec.copy_(_geometric_median(sample_batch.to(self.b_dec.device)))
+        the optimizer exists, on a throwaway sample of real activations.
+
+        `sample_batch` is scaled by `config.activation_scale` first (default 1.0, a no-op) so
+        `b_dec` — and everything computed relative to it in `forward()` — lives in the same
+        internal coordinate space, for architectures that define one (JumpReLU/Gated)."""
+        scale = getattr(self.config, "activation_scale", 1.0)
+        self.b_dec.copy_(_geometric_median(sample_batch.to(self.b_dec.device) * scale))
 
     @torch.no_grad()
     def normalize_decoder_(self) -> None:
@@ -386,7 +391,10 @@ class JumpReLUSAEModel(SAEPreTrainedModel):
         self.post_init()
 
     def encode_pre_activation(self, activations: torch.Tensor) -> torch.Tensor:
-        return (activations - self.b_dec) @ self.W_enc + self.b_enc
+        """Operates in the internal, `activation_scale`-rescaled coordinate space that
+        `bandwidth`/`init_threshold` are calibrated for (`b_dec` is seeded in that same space
+        by `initialize_bias_from_data`) — a no-op when `activation_scale=1.0`."""
+        return (activations * self.config.activation_scale - self.b_dec) @ self.W_enc + self.b_enc
 
     def encode(self, activations: torch.Tensor) -> torch.Tensor:
         pre_acts = self.encode_pre_activation(activations)
@@ -395,7 +403,10 @@ class JumpReLUSAEModel(SAEPreTrainedModel):
     def forward(self, activations: torch.Tensor) -> SAEOutput:
         pre_acts = self.encode_pre_activation(activations)
         latents = _JumpReLUSTE.apply(pre_acts, self.log_threshold, self.bandwidth)
-        reconstruction = self.decode(latents)
+        # decode() returns a reconstruction in the same scaled space as b_dec/activations*scale
+        # above — divide back out so mse_loss (and every downstream eval metric) compares
+        # against activations in their original, raw units.
+        reconstruction = self.decode(latents) / self.config.activation_scale
         mse_loss = self.reconstruction_loss(activations, reconstruction)
 
         active = _HeavisideSTE.apply(pre_acts, self.log_threshold, self.bandwidth)
@@ -427,11 +438,14 @@ class GatedSAEModel(SAEPreTrainedModel):
         self.post_init()
 
     def gate_pre_activation(self, activations: torch.Tensor) -> torch.Tensor:
-        return (activations - self.b_dec) @ self.W_gate + self.b_gate
+        """Operates in the internal, `activation_scale`-rescaled coordinate space (`b_dec` is
+        seeded in that same space by `initialize_bias_from_data`) — a no-op when
+        `activation_scale=1.0`."""
+        return (activations * self.config.activation_scale - self.b_dec) @ self.W_gate + self.b_gate
 
     def magnitude_pre_activation(self, activations: torch.Tensor) -> torch.Tensor:
         w_mag = self.W_gate * torch.exp(self.r_mag)  # per-latent rescale, broadcasts on d_hidden
-        return (activations - self.b_dec) @ w_mag + self.b_mag
+        return (activations * self.config.activation_scale - self.b_dec) @ w_mag + self.b_mag
 
     def encode(self, activations: torch.Tensor) -> torch.Tensor:
         gate = (self.gate_pre_activation(activations) > 0).to(activations.dtype)
@@ -444,7 +458,10 @@ class GatedSAEModel(SAEPreTrainedModel):
         magnitude = torch.relu(self.magnitude_pre_activation(activations))
         latents = gate * magnitude
 
-        reconstruction = self.decode(latents)
+        # decode() returns a reconstruction in the same scaled space as b_dec/activations*scale
+        # above — divide back out so mse_loss (and every downstream eval metric) compares
+        # against activations in their original, raw units.
+        reconstruction = self.decode(latents) / self.config.activation_scale
         mse_loss = self.reconstruction_loss(activations, reconstruction)
         l0 = latents.gt(0).sum(dim=-1).float().mean()
 
@@ -454,10 +471,12 @@ class GatedSAEModel(SAEPreTrainedModel):
         # Frozen-decoder auxiliary reconstruction (Eq. 8): trains the gate path via a real
         # reconstruction target without letting gradient reach W_dec through this side term.
         # b_dec is intentionally NOT fully isolated: relu_gate already depends on it through
-        # gate_pre_activation's (non-detached) "activations - b_dec" centering step, so b_dec's
-        # encoder-centering role still receives gradient here, same as W_gate/b_gate do — only
-        # its decoder-output use (the "+ b_dec" below) is stopped.
-        frozen_reconstruction = relu_gate @ self.W_dec.detach() + self.b_dec.detach()
+        # gate_pre_activation's (non-detached) "activations*scale - b_dec" centering step, so
+        # b_dec's encoder-centering role still receives gradient here, same as W_gate/b_gate do —
+        # only its decoder-output use (the "+ b_dec" below) is stopped.
+        frozen_reconstruction = (
+            relu_gate @ self.W_dec.detach() + self.b_dec.detach()
+        ) / self.config.activation_scale
         aux_loss = self.reconstruction_loss(activations, frozen_reconstruction)
 
         return SAEOutput(

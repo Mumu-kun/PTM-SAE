@@ -170,7 +170,7 @@ def test_topk_training_loop_runs_and_checkpoints(tmp_path):
 
 
 def test_jumprelu_training_loop_runs_and_checkpoints(tmp_path):
-    """Verify the JumpReLU training loop (LR schedule, L0-coefficient warmup) runs end to end."""
+    """Verify the JumpReLU training loop (LR schedule, tanh+pre-act sparsity ramp) runs end to end."""
     cache_dir, corpus_dir = _write_fixture(tmp_path)
     checkpoint_dir = tmp_path / "checkpoints"
 
@@ -178,8 +178,7 @@ def test_jumprelu_training_loop_runs_and_checkpoints(tmp_path):
         sae_type="jumprelu",
         d_in=HIDDEN_DIM,
         d_hidden=16,
-        l0_coefficient=1e-3,
-        l0_warmup_steps=3,
+        sparsity_coefficient=20.0,
         total_steps=6,
         warmup_steps=2,
         batch_size=8,
@@ -198,11 +197,11 @@ def test_jumprelu_training_loop_runs_and_checkpoints(tmp_path):
     assert (checkpoint_dir / "latest" / "config.json").exists()
 
 
-def test_jumprelu_requires_l0_coefficient():
-    """Verify the config refuses to silently default l0_coefficient for JumpReLU runs."""
+def test_jumprelu_requires_sparsity_coefficient():
+    """Verify the config refuses to silently default sparsity_coefficient for JumpReLU runs."""
     try:
         SAETrainingConfig(sae_type="jumprelu", total_steps=10)
-        raise AssertionError("expected ValueError for missing l0_coefficient")
+        raise AssertionError("expected ValueError for missing sparsity_coefficient")
     except ValueError:
         pass
 
@@ -526,8 +525,7 @@ def test_jumprelu_training_loop_logs_threshold_stats(tmp_path, capsys):
         sae_type="jumprelu",
         d_in=HIDDEN_DIM,
         d_hidden=16,
-        l0_coefficient=1e-3,
-        l0_warmup_steps=3,
+        sparsity_coefficient=20.0,
         total_steps=6,
         warmup_steps=2,
         batch_size=8,
@@ -545,6 +543,7 @@ def test_jumprelu_training_loop_logs_threshold_stats(tmp_path, capsys):
 
     assert "threshold_mean=" in out
     assert "threshold_std=" in out
+    assert "decoder_norm_mean=" in out
 
 
 def test_resume_from_continues_step_count_and_optimizer_state(tmp_path):
