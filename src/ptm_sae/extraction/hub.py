@@ -360,3 +360,38 @@ class HfSyncClient:
         # 3. Atomically replace target destination
         os.replace(tmp_dest, target_path)
         return target_path
+
+
+def publish_kaggle_dataset(
+    local_dir: Path, slug: str, title: str, message: str
+) -> None:
+    """Publishes/versions a Kaggle Dataset directly from `local_dir` -- first run creates it
+    (`dataset_create_new`), later runs version it (`dataset_create_version`). Requires a
+    `dataset-metadata.json` alongside the data files; written here rather than checked into the
+    repo since the slug is run-specific (depends on the invoking user's Kaggle username). Auth via
+    `KAGGLE_USERNAME`/`KAGGLE_KEY` env vars (the `kaggle` package's own convention)."""
+    import json
+
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
+    metadata = {"title": title, "id": slug, "licenses": [{"name": "CC0-1.0"}]}
+    (local_dir / "dataset-metadata.json").write_text(
+        json.dumps(metadata, indent=2), encoding="utf-8"
+    )
+
+    api = KaggleApi()
+    api.authenticate()
+    try:
+        api.dataset_create_version(
+            str(local_dir), version_notes=message, dir_mode="zip"
+        )
+        print(f"  [Kaggle] versioned dataset {slug}")
+    except Exception as version_err:  # noqa: BLE001 -- first-ever publish has no version to bump
+        try:
+            api.dataset_create_new(str(local_dir), dir_mode="zip", public=False)
+            print(f"  [Kaggle] created dataset {slug}")
+        except Exception as create_err:
+            raise RuntimeError(
+                f"Kaggle Dataset publish failed (version attempt: {version_err}; "
+                f"create attempt: {create_err})"
+            ) from create_err

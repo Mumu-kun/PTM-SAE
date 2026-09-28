@@ -56,7 +56,7 @@ ptm-sae-engine/
 │   ├── adr/                   # Architecture Decision Records (ADR 0001, ADR 0002)
 │   └── research/              # Literature benchmarks, stratification, and PTM selection
 ├── notebooks/
-│   └── kaggle_extraction.ipynb # Zero-setup Kaggle GPU extraction notebook
+│   └── kaggle_pipeline.ipynb   # Zero-setup Kaggle corpus-build + GPU extraction notebook
 ├── src/ptm_sae/
 │   ├── config.py              # Strict dataclass configurations & YAML parsing
 │   ├── data/                  # Ingestion adapters, invariant checking, MILP splitting
@@ -122,7 +122,7 @@ uv run python -m ptm_sae.pipeline \
 
 ## Cloud Execution (Kaggle & Colab)
 
-For multi-GPU or T4/P100/A100 cloud execution, open [notebooks/kaggle_extraction.ipynb](notebooks/kaggle_extraction.ipynb).
+For multi-GPU or T4/P100/A100 cloud execution, open [notebooks/kaggle_pipeline.ipynb](notebooks/kaggle_pipeline.ipynb).
 The notebook automatically detects Kaggle environments, configures local scratch storage paths, and handles asynchronous chunk uploading to Hugging Face Hub.
 
 ---

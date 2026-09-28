@@ -25,7 +25,7 @@ import pyarrow.parquet as pq
 from ptm_sae.config import PipelineConfig
 from ptm_sae.data import parse_uniprot_fasta
 from ptm_sae.data.schema import Protein
-from ptm_sae.extraction.hub import resolve_hf_token
+from ptm_sae.extraction.hub import publish_kaggle_dataset, resolve_hf_token
 from ptm_sae.extraction.pipeline import run_extraction_pipeline
 from ptm_sae.extraction.progress import PipelineProgressManager
 from ptm_sae.extraction.reader import SafeTensorsReader
@@ -73,6 +73,15 @@ def _load_published_corpus_proteins(
     ]
 
 
+def _kaggle_activation_dataset_slug(
+    kaggle_username: str, config: PipelineConfig
+) -> str:
+    """One Kaggle Dataset per (model, layer), e.g. `<user>/ptm-sae-activations-esm2-t33-650m-ur50d-layer24`
+    -- matches the HF remote_subpath's own per-model/layer scoping (`resolve_remote_subpath`)."""
+    model_tag = config.model.model_name.split("/")[-1].lower().replace("_", "-")
+    return f"{kaggle_username}/ptm-sae-activations-{model_tag}-layer{config.model.target_layer}"
+
+
 def run_full_lifecycle(
     config: PipelineConfig,
     fasta_path: str | Path | None = None,
@@ -81,6 +90,7 @@ def run_full_lifecycle(
     remote_repo_id: str | None = None,
     remote_subpath: str | None = None,
     token: str | None = None,
+    kaggle_username: str | None = None,
     progress_manager: PipelineProgressManager | None = None,
 ) -> dict:
     """Executes the extraction-and-synchronization lifecycle:
@@ -90,8 +100,10 @@ def run_full_lifecycle(
     2. Build Protein Records: parses the FASTA, or reads `discovery_train`+`discovery_val` rows
        straight out of the published corpus -- never `held_out`, reserved for Member 2.
     3. ESM-2 Activation Extraction: Batched extraction across single/multi-GPU into SafeTensors shards.
-    4. Remote Sync Status: Reports whether extraction shards synced to the HF Hub (done
-       asynchronously by the sharder itself during stage 3, not re-uploaded here).
+    4. Remote Sync: Reports whether extraction shards synced to the HF Hub (done asynchronously by
+       the sharder itself during stage 3, not re-uploaded here), and -- if `kaggle_username` is
+       given -- publishes/versions a Kaggle Dataset from the same local shard directory, one
+       dataset per (model, layer), so a later run for a different layer doesn't overwrite this one.
     5. Readback Verification: Validates zero-copy indexing and biological coordinate invariants.
     """
     pm = progress_manager or PipelineProgressManager()
@@ -157,18 +169,28 @@ def run_full_lifecycle(
     )
 
     # 4. Remote hub sync status (shard/manifest upload itself already ran asynchronously,
-    # inside stage 3, via SafeTensorsSharder's own HfSyncClient)
+    # inside stage 3, via SafeTensorsSharder's own HfSyncClient), plus an optional Kaggle
+    # Dataset publish from the same local shard directory.
     resolved_token = resolve_hf_token(token)
 
     if resolved_repo and resolved_token:
         pm.start_stage(
             4, total_items=1, info=f"Extraction shards synced to {resolved_repo}"
         )
-        pm.finish_stage(
-            4,
-            summary=f"Extraction shards synced to {resolved_repo} during stage 3 "
-            "(asynchronous background upload).",
+        summary = (
+            f"Extraction shards synced to {resolved_repo} during stage 3 "
+            "(asynchronous background upload)."
         )
+        if kaggle_username:
+            slug = _kaggle_activation_dataset_slug(kaggle_username, config)
+            publish_kaggle_dataset(
+                Path(config.sharding.output_dir),
+                slug,
+                f"ESM-2 activations ({config.model.model_name}, layer {config.model.target_layer})",
+                f"{len(target_proteins)} proteins",
+            )
+            summary += f" Kaggle Dataset published: {slug}."
+        pm.finish_stage(4, summary=summary)
     elif resolved_repo and not resolved_token:
         pm.start_stage(
             4, total_items=1, info="Remote repo configured but token missing"
@@ -268,6 +290,12 @@ def main():
         default=None,
         help="Override compute device ('cuda', 'cpu', 'auto')",
     )
+    parser.add_argument(
+        "--kaggle-username",
+        type=str,
+        default=None,
+        help="If set, publishes/versions a Kaggle Dataset per (model, layer) from the shard dir.",
+    )
     args = parser.parse_args()
 
     cfg = PipelineConfig.from_yaml(args.config)
@@ -281,6 +309,7 @@ def main():
         max_proteins=args.max_proteins,
         remote_repo_id=args.remote_repo,
         remote_subpath=args.remote_subpath,
+        kaggle_username=args.kaggle_username,
     )
 
 
