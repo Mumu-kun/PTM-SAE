@@ -46,14 +46,17 @@ eval_interval_steps: 500
 checkpoint_dir: checkpoints/jumprelu_w4096
 save_all_checkpoints: false
 
-# Tier 3 Residue Collapse canary: ptm_sites.jsonl exists (data/processed/, and via the remote
-# HF dataset fallback for Kaggle).
-enable_collapse_check: true
+# Both canaries disabled for now: collapse_check.py/residue_dominance.py (current main) read
+# labels_stratified.parquet/corpus.parquet/exclusion_mask.parquet/gold_negatives_nglyco.parquet
+# from the remote corpus subpath, but only the older proteins.jsonl/ptm_sites.jsonl/
+# split_manifest.json are actually published to mustafa-muhaimin/ptm-sae-dataset today (the
+# Parquet-based corpus-pipeline rework that would publish them is still WIP). load_partition_ids
+# (dataset.py) was reverted to the matching proteins.jsonl-based version so training itself can
+# proceed; these two files were not reverted (much larger diffs) — re-enable once either the
+# rework is published or these are reverted too.
+enable_collapse_check: false
 collapse_check_interval_steps: 2000
-
-# Residue-Dominance Gate canary — needs only residue identity (no PTM labels), so it's cheaper
-# than the Tier 3 check above. Shares its cadence (collapse_check_interval_steps).
-enable_residue_dominance_check: true
+enable_residue_dominance_check: false
 
 cache_dir: cache/activations/esm2_650m_l24
 remote_repo_id: mustafa-muhaimin/ptm-sae-dataset

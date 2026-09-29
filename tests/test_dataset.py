@@ -3,8 +3,6 @@
 import json
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import safetensors.torch
 import torch
 
@@ -82,8 +80,8 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
         {"uniprot_id": "proteinC", "partition": "discovery_train", "sequence": "CCCC"},
         {"uniprot_id": "proteinD", "partition": "held_out", "sequence": "D"},
     ]
-    table = pa.Table.from_pylist(partitions)
-    pq.write_table(table, corpus_dir / "corpus.parquet")
+    with open(corpus_dir / "proteins.jsonl", "w", encoding="utf-8") as f:
+        f.writelines(json.dumps(record) + "\n" for record in partitions)
 
     return cache_dir, corpus_dir
 

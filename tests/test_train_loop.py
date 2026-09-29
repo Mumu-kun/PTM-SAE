@@ -86,7 +86,13 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
         # held_out: never read by anything the training-time canaries touch.
         {"uniprot_id": "proteinD", "partition": "held_out", "sequence": "K"},
     ]
+    # corpus.parquet: still read by collapse_check.py/residue_dominance.py (not reverted, unlike
+    # dataset.py's load_partition_ids — see configs/train_jumprelu_baseline.yaml's comment).
     pq.write_table(pa.Table.from_pylist(partitions), corpus_dir / "corpus.parquet")
+    # proteins.jsonl: read by load_partition_ids (reverted to match what's actually published to
+    # the HF dataset today).
+    with open(corpus_dir / "proteins.jsonl", "w", encoding="utf-8") as f:
+        f.writelines(json.dumps(record) + "\n" for record in partitions)
 
     return cache_dir, corpus_dir
 
