@@ -152,11 +152,15 @@ def run_cdhit(
         "-l",
         str(min_len_kept),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603 -- cd-hit, a fixed local binary, never untrusted input
+    print(
+        f"[M2] Running cd-hit on {len(cdhit_corpus)} sequences (this can take a while, "
+        f"CD-HIT prints its own progress below):"
+    )
+    result = subprocess.run(  # noqa: S603 -- cd-hit, a fixed local binary, never untrusted input
+        cmd, text=True
+    )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"cd-hit failed (rc={result.returncode}):\n{result.stdout}\n{result.stderr}"
-        )
+        raise RuntimeError(f"cd-hit failed (rc={result.returncode})")
 
     clstr_path = Path(str(out_path) + ".clstr")
     assignment: dict[str, int] = {}
@@ -187,9 +191,13 @@ def raw_type_hits_by_accession(
     drive M2's stratified split (see module docstring). Keeps EVERY canonical type, not just
     `cfg.primary_types`, and resolves types residue-aware where the corpus sequence is
     available."""
+    from tqdm.auto import tqdm
+
     known = set(cfg.ptm_type_to_stratum)
     hits: dict[str, dict[str, int]] = {}
-    for label, path in m1_raw_paths.items():
+    for label, path in tqdm(
+        m1_raw_paths.items(), desc="[M2] Raw source parsing", unit="source", leave=False
+    ):
         if label not in parsers:
             continue
         df = parsers[label](path)
