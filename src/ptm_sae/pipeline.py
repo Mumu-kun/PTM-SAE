@@ -8,8 +8,9 @@ Coordinates:
 5. Verification (zero-copy readback sanity checks).
 
 Corpus-building itself (CD-HIT clustering + the PTM label cascade) no longer runs in-process
-here -- it runs standalone as a Kaggle job (`ptm_sae.corpus.pipeline`, via `scripts/build_corpus.py`)
-and publishes `corpus.parquet`/`labels_stratified.parquet`/etc. to the HF Hub. The non-sample path
+here -- it runs standalone as a Kaggle job (`ptm_sae.corpus.pipeline`, called directly from
+`notebooks/kaggle_pipeline.ipynb`'s Phase A cells) and publishes `corpus.parquet`/
+`labels_stratified.parquet`/etc. to the HF Hub. The non-sample path
 below reads that already-published corpus (via `training.dataset.load_partition_ids`'s
 local-cache-then-remote-hydrate pattern) instead of re-deriving one (implementation plan, Stage 4,
 decision 7). `sample_only=True` never built a corpus this way either -- it only ever parsed

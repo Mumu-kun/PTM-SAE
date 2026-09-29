@@ -25,6 +25,27 @@ from ptm_sae.corpus import acquisition, clustering, labels
 from ptm_sae.corpus.acquisition import CPLM_SPECIES_HUMAN
 from ptm_sae.corpus.config import CFG, CorpusPaths
 from ptm_sae.data.splitting import subdivide_discovery_clusters
+from ptm_sae.extraction.hub import HfSyncClient
+
+ARTIFACT_FILENAMES = [
+    "corpus.parquet",
+    "labels_stratified.parquet",
+    "stratum_counts.json",
+    "split_manifest.json",
+    "exclusion_mask.parquet",
+    "gold_negatives_nglyco.parquet",
+]
+
+
+def upload_to_hf(paths: CorpusPaths, repo_id: str, subpath: str) -> None:
+    hub = HfSyncClient()
+    for filename in ARTIFACT_FILENAMES:
+        file_path = paths.processed_dir / filename
+        if not file_path.exists():
+            print(f"  [HF] {filename}: not produced this run, skipping")
+            continue
+        result = hub.upload_shard(repo_id, subpath, file_path)
+        print(f"  [HF] {filename}: {'uploaded' if result else 'already up to date'}")
 
 
 def _build_m2_inputs(resolved: dict, mock: bool) -> tuple[dict, dict]:
