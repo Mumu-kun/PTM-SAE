@@ -8,6 +8,7 @@ dependencies = [
     "torch>=2.2.0",
     "transformers>=4.40.0",
     "safetensors>=0.4.2",
+    "huggingface_hub>=0.23.0",
     "pydantic>=2.6.0",
     "pyyaml>=6.0",
     "tqdm>=4.66.0",
@@ -25,6 +26,10 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.16.6",
 ]
+# Publishing the corpus / activation datasets to Kaggle (notebooks/kaggle_pipeline.ipynb).
+kaggle = [
+    "kaggle>=1.6.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -40,6 +45,11 @@ pythonpath = ["src"]
 [dependency-groups]
 dev = [
     "ruff>=0.16.6",
+]
+# Jupyter kernel + server for running the notebooks on a remote GPU box.
+notebook = [
+    "ipykernel>=6.29.0",
+    "jupyterlab>=4.0.0",
 ]
 
 [tool.ruff]

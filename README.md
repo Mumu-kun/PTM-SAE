@@ -120,10 +120,35 @@ uv run python -m ptm_sae.pipeline \
 
 ---
 
-## Cloud Execution (Kaggle & Colab)
+## Running Remotely (GPU box, Kaggle, Colab)
 
-For multi-GPU or T4/P100/A100 cloud execution, open [notebooks/kaggle_pipeline.ipynb](notebooks/kaggle_pipeline.ipynb).
-The notebook automatically detects Kaggle environments, configures local scratch storage paths, and handles asynchronous chunk uploading to Hugging Face Hub.
+The same code and YAML configs run everywhere. Code lives in git (`main`); data and checkpoints live under a **data root** that relative config paths hang off: `$PTM_SAE_DATA_ROOT`, else `/kaggle/working` on Kaggle, else the repo root.
+
+**Kaggle / Colab:** open [notebooks/kaggle_pipeline.ipynb](notebooks/kaggle_pipeline.ipynb) (corpus + activation extraction) or [notebooks/train_sae.ipynb](notebooks/train_sae.ipynb) (SAE training). The first cells clone the repo, install the dependencies declared in `pyproject.toml`, and discover secrets (`HF_TOKEN`, `WANDB_API_KEY`, `GH_TOKEN`) from the platform's secret store.
+
+**Persistent Linux GPU box:**
+
+```bash
+git clone https://github.com/Mumu-kun/PTM-SAE.git && cd PTM-SAE   # any folder name works
+uv sync --group notebook                      # locked env; keeps the CUDA torch build
+export PTM_SAE_DATA_ROOT=/path/to/big/disk    # optional: where cache/, checkpoints/ go
+
+# Pre-download over the (possibly slow) link before training; resumable and idempotent.
+# Activations come from ptm-sae-dataset, corpus tables from ptm-sae-corpus (both set in the YAML)
+uv run python -m ptm_sae.data.sync --config configs/train_topk_baseline.yaml
+uv run python -m ptm_sae.data.sync --config ... --verify   # re-hash local files, repair bad ones
+uv run python -m ptm_sae.data.sync --config ... --force    # re-download everything selected
+
+# Train headless (survives a dropped connection) ...
+tmux new -s sae
+uv run python -m ptm_sae.training.train --config configs/train_topk_baseline.yaml --set total_steps=2000
+
+# ... or drive it from a notebook on your PC through an SSH tunnel
+uv run jupyter lab --no-browser --port 8888
+ssh -C -o ServerAliveInterval=30 -L 8888:localhost:8888 user@remote   # on your PC
+```
+
+The notebooks fast-forward an existing checkout (`git pull --ff-only --autostash`) and never force-reset it; restart the kernel after a pull that changed `src/`.
 
 ---
 

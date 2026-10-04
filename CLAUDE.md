@@ -22,7 +22,7 @@ The thesis operates on a strict two-member division of labor (see `proposal/Unif
 2. **User (Member 1 — Architecture & Training)**:
    - **Owns**: Phase 1 (extraction/caching), Phase 2 (baseline ablations: TopK vs JumpReLU), Phase 3 (modular topologies: Stratified, PolySAE, CSAE), Phase 4 (Bespoke Modular SAE training: "Arm D").
    - **Current State**: Phase 0 & Phase 1 are 100% complete and verified.
-   - **Remote Data Authority**: All activation shards and manifests are live at Hugging Face Dataset: `mustafa-muhaimin/ptm-sae-dataset`.
+   - **Remote Data Authority**: Activation shards and manifests live at Hugging Face Dataset `mustafa-muhaimin/ptm-sae-dataset`; the corpus tables (`corpus.parquet`, labels, masks) live in a separate dataset, `mustafa-muhaimin/ptm-sae-corpus` (`corpus/` subfolder).
 
 ---
 
@@ -31,7 +31,7 @@ We are currently entering **Phase 2 & Phase 3**:
 
 1. **Sharded DataLoader (`src/ptm_sae/data/` or `src/ptm_sae/training/`)**:
    - PyTorch `IterableDataset` / DataLoader consuming SafeTensors activation shards via `SafeTensorsReader`.
-   - On-demand shard hydration from `mustafa-muhaimin/ptm-sae-dataset`.
+   - On-demand shard hydration from `mustafa-muhaimin/ptm-sae-dataset` (corpus from `mustafa-muhaimin/ptm-sae-corpus`).
    - Filtered strictly to `discovery_train` tokens (~5.08M tokens, 68% of corpus). `discovery_val` is for validation; `held_out` is reserved for Member 2.
 
 2. **SAE Model Implementations (`src/ptm_sae/models/`)**:

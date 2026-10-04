@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.ipynb text eol=lf
+*.parquet binary
+*.safetensors binary
+*.pdf binary
+*.xlsx binary
+*.docx binary
