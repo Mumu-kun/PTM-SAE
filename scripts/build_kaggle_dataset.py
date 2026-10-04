@@ -35,6 +35,7 @@ from ptm_sae.training.dataset import load_partition_ids
 def build_kaggle_dataset(
     output_dir: Path,
     repo_id: str,
+    corpus_repo_id: str,
     remote_subpath: str,
     remote_corpus_subpath: str,
 ) -> None:
@@ -44,15 +45,16 @@ def build_kaggle_dataset(
     # Hydrates proteins.jsonl (partition IDs) and ptm_sites.jsonl (full file, filtered only at
     # read time) directly into corpus_dir as a side effect — no separate download logic needed.
     train_ids = load_partition_ids(
-        "discovery_train", corpus_dir=corpus_dir, remote_repo_id=repo_id,
+        "discovery_train", corpus_dir=corpus_dir, remote_corpus_repo_id=corpus_repo_id,
         remote_corpus_subpath=remote_corpus_subpath,
     )
     val_ids = load_partition_ids(
-        "discovery_val", corpus_dir=corpus_dir, remote_repo_id=repo_id,
+        "discovery_val", corpus_dir=corpus_dir, remote_corpus_repo_id=corpus_repo_id,
         remote_corpus_subpath=remote_corpus_subpath,
     )
     load_discovery_val_labels(
-        corpus_dir=corpus_dir, remote_repo_id=repo_id, remote_corpus_subpath=remote_corpus_subpath,
+        corpus_dir=corpus_dir, remote_corpus_repo_id=corpus_repo_id,
+        remote_corpus_subpath=remote_corpus_subpath,
     )
     needed_ids = train_ids | val_ids
     print(f"discovery_train + discovery_val: {len(needed_ids)} proteins")
@@ -89,6 +91,7 @@ def main():
     )
     parser.add_argument("--output-dir", type=str, required=True, help="Local staging directory")
     parser.add_argument("--repo-id", type=str, default="mustafa-muhaimin/ptm-sae-dataset")
+    parser.add_argument("--corpus-repo-id", type=str, default="mustafa-muhaimin/ptm-sae-corpus")
     parser.add_argument(
         "--remote-subpath", type=str, default="activations/esm2_t33_650M_UR50D/layer_24"
     )
@@ -98,7 +101,9 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    build_kaggle_dataset(output_dir, args.repo_id, args.remote_subpath, args.remote_corpus_subpath)
+    build_kaggle_dataset(
+        output_dir, args.repo_id, args.corpus_repo_id, args.remote_subpath, args.remote_corpus_subpath
+    )
 
 
 if __name__ == "__main__":

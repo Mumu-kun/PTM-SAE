@@ -60,6 +60,12 @@ class ShardingConfig(BaseModel):
         default=None,
         description="LRU shard retention limit on local disk for constrained instances",
     )
+    corpus_fingerprint: str | None = Field(
+        default=None,
+        description="Identity of the corpus.parquet this extraction draws from (see "
+        "training.dataset.corpus_fingerprint); recorded in the manifest so training can detect "
+        "activations that no longer match the corpus partitioning",
+    )
 
 
 class PipelineConfig(BaseModel):

@@ -74,6 +74,20 @@ class SafeTensorsSharder:
         if self.cfg.resume and self.manifest_path.exists():
             self._load_manifest()
 
+        # Provenance: stamp which corpus this extraction draws from. Resuming against a different
+        # corpus would mix activations from two partitionings in one manifest. A legacy manifest
+        # with no stamp is adopted (and stamped) as is.
+        fingerprint = self.cfg.corpus_fingerprint
+        if fingerprint:
+            existing = self.manifest.get("corpus_fingerprint")
+            if existing and existing != fingerprint:
+                raise ValueError(
+                    "Existing manifest was extracted from a different corpus "
+                    f"({existing[:12]}...) than the current one ({fingerprint[:12]}...). "
+                    "Start a fresh output_dir/remote_subpath, or set sharding.resume=false."
+                )
+            self.manifest["corpus_fingerprint"] = fingerprint
+
         # Find next available shard index
         self.current_shard_idx = len(self.manifest["shards"])
 

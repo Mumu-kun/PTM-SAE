@@ -117,3 +117,34 @@ def test_run_extraction_pipeline_end_to_end(tmp_path):
     )
     assert second_manifest["total_tokens"] == 685
     assert len(second_manifest["entries"]) == 3
+
+
+def test_sharder_stamps_corpus_fingerprint_and_refuses_a_different_corpus(tmp_path):
+    cfg = PipelineConfig.from_yaml("configs/dev_8m.yaml")
+    cfg.sharding.output_dir = str(tmp_path / "stamped_cache")
+
+    # 1. A legacy manifest (no stamp) is adopted and stamped on resume
+    legacy_dir = Path(cfg.sharding.output_dir)
+    legacy_dir.mkdir()
+    (legacy_dir / "manifest.json").write_text(
+        '{"version": "1.0", "total_tokens": 0, "shards": [], "entries": {}}',
+        encoding="utf-8",
+    )
+    cfg.sharding.corpus_fingerprint = "a" * 64
+    sharder = SafeTensorsSharder(cfg.sharding)
+    assert sharder.manifest["corpus_fingerprint"] == "a" * 64
+
+    # 2. Once stamped on disk, resuming against a different corpus is refused
+    (legacy_dir / "manifest.json").write_text(
+        '{"version": "1.0", "total_tokens": 0, "shards": [], "entries": {},'
+        f' "corpus_fingerprint": "{"a" * 64}"}}',
+        encoding="utf-8",
+    )
+    cfg.sharding.corpus_fingerprint = "b" * 64
+    with pytest.raises(ValueError, match="different corpus"):
+        SafeTensorsSharder(cfg.sharding)
+
+    # 3. The same corpus resumes cleanly
+    cfg.sharding.corpus_fingerprint = "a" * 64
+    SafeTensorsSharder(cfg.sharding)
+

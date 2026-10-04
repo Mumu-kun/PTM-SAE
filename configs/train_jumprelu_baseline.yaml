@@ -55,6 +55,7 @@ cache_dir: cache/activations/esm2_650m_l24
 remote_repo_id: mustafa-muhaimin/ptm-sae-dataset
 remote_subpath: activations/esm2_t33_650M_UR50D/layer_24
 corpus_dir: data/processed
+remote_corpus_repo_id: mustafa-muhaimin/ptm-sae-corpus
 remote_corpus_subpath: corpus
 num_workers: 0
 shuffle_buffer_size: 65536

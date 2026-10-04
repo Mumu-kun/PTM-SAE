@@ -82,22 +82,29 @@ class SafeTensorsReader:
             with contextlib.suppress(PermissionError, OSError):
                 (self.cache_dir / shard_name).unlink(missing_ok=True)
 
-    def _get_shard_handle(self, shard_filename: str):
+    def ensure_shard(self, shard_filename: str) -> Path:
+        """Returns the local path of a shard, hydrating it on demand from the remote repository's
+        structured shards/ subpath if it is not cached yet."""
         shard_path = self.cache_dir / shard_filename
+        if shard_path.exists():
+            return shard_path
 
-        # 1. Hydrate shard on-demand from remote repository structured shards/ subpath
-        if not shard_path.exists():
-            if not (self.hub and self.remote_repo_id):
-                raise FileNotFoundError(
-                    f"Shard file {shard_filename} not found in {self.cache_dir}"
-                )
-
-            sub = self.remote_subpath.rstrip("/") if self.remote_subpath else ""
-            shards_subpath = f"{sub}/shards" if sub else "shards"
-            self.hub.hydrate_shard(
-                self.remote_repo_id, shards_subpath, shard_filename, shard_path
+        if not (self.hub and self.remote_repo_id):
+            raise FileNotFoundError(
+                f"Shard file {shard_filename} not found in {self.cache_dir}"
             )
-            self._evict_lru(keep_shards={shard_filename})
+
+        sub = self.remote_subpath.rstrip("/") if self.remote_subpath else ""
+        shards_subpath = f"{sub}/shards" if sub else "shards"
+        self.hub.hydrate_shard(
+            self.remote_repo_id, shards_subpath, shard_filename, shard_path
+        )
+        self._evict_lru(keep_shards={shard_filename})
+        return shard_path
+
+    def _get_shard_handle(self, shard_filename: str):
+        # 1. Hydrate shard on-demand if absent
+        shard_path = self.ensure_shard(shard_filename)
 
         # 2. Touch access timestamp for LRU accounting
         self._access_times[shard_filename] = time.time()

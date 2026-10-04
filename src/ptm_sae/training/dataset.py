@@ -2,7 +2,9 @@
 Corpus Partition (`discovery_train` or `discovery_val` — never `held_out`, which stays reserved
 for Member 2's final evaluation)."""
 
+import hashlib
 import shutil
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
@@ -18,10 +20,27 @@ from ptm_sae.extraction.reader import SafeTensorsReader
 Partition = Literal["discovery_train", "discovery_val"]
 
 
+def corpus_fingerprint(corpus_parquet: str | Path) -> str:
+    """SHA-256 identity of the corpus content that activations depend on: every discovery
+    protein's (uniprot_id, partition, sequence). `held_out` rows and label columns are left out,
+    so rebuilding labels or Member 2's held-out set does not invalidate extracted activations,
+    while any change to the discovery split or a discovery sequence does."""
+    table = pq.read_table(corpus_parquet, columns=["uniprot_id", "partition", "sequence"])
+    rows = sorted(
+        (r["uniprot_id"], r["partition"], r["sequence"])
+        for r in table.to_pylist()
+        if r["partition"] in ("discovery_train", "discovery_val")
+    )
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update("\t".join(row).encode("utf-8") + b"\n")
+    return digest.hexdigest()
+
+
 def load_partition_ids(
     partition: Partition,
     corpus_dir: str | Path = "data/processed",
-    remote_repo_id: str | None = None,
+    remote_corpus_repo_id: str | None = None,
     remote_corpus_subpath: str = "corpus",
     token: str | None = None,
 ) -> set[str]:
@@ -32,13 +51,13 @@ def load_partition_ids(
     """
     local_path = Path(corpus_dir) / "corpus.parquet"
 
-    if not local_path.exists() and remote_repo_id:
+    if not local_path.exists() and remote_corpus_repo_id:
         resolved_token = resolve_hf_token(token)
         remote_path = f"{remote_corpus_subpath.rstrip('/')}/corpus.parquet"
 
         def _download() -> str:
             return hf_hub_download(
-                repo_id=remote_repo_id,
+                repo_id=remote_corpus_repo_id,
                 filename=remote_path,
                 repo_type="dataset",
                 token=resolved_token,
@@ -50,7 +69,7 @@ def load_partition_ids(
 
     if not local_path.exists():
         raise FileNotFoundError(
-            f"corpus.parquet not found locally at {local_path} or on remote repository {remote_repo_id}."
+            f"corpus.parquet not found locally at {local_path} or on remote repository {remote_corpus_repo_id}."
         )
 
     table = pq.read_table(local_path, columns=["uniprot_id", "partition"])
@@ -78,6 +97,7 @@ class ActivationPartitionDataset(IterableDataset):
         remote_repo_id: str | None = None,
         remote_subpath: str | None = None,
         corpus_dir: str | Path = "data/processed",
+        remote_corpus_repo_id: str | None = None,
         remote_corpus_subpath: str = "corpus",
         max_cached_shards: int | None = None,
         token: str | None = None,
@@ -101,7 +121,7 @@ class ActivationPartitionDataset(IterableDataset):
         partition_ids = load_partition_ids(
             partition=partition,
             corpus_dir=corpus_dir,
-            remote_repo_id=remote_repo_id,
+            remote_corpus_repo_id=remote_corpus_repo_id,
             remote_corpus_subpath=remote_corpus_subpath,
             token=token,
         )
@@ -122,6 +142,27 @@ class ActivationPartitionDataset(IterableDataset):
             shard_entries.setdefault(entry["shard_file"], []).append(uniprot_id)
             total_tokens += entry["length"]
         probe_reader.close()
+
+        # Stale-activation guards: the manifest's corpus stamp must match the corpus on disk, and
+        # partial coverage is never silent (a run on 74% of discovery_train looks fine otherwise).
+        manifest_fingerprint = probe_reader.manifest.get("corpus_fingerprint")
+        if manifest_fingerprint:
+            current = corpus_fingerprint(Path(corpus_dir) / "corpus.parquet")
+            if current != manifest_fingerprint:
+                raise ValueError(
+                    f"Activations in {cache_dir} were extracted from a different corpus "
+                    f"({manifest_fingerprint[:12]}...) than {Path(corpus_dir) / 'corpus.parquet'} "
+                    f"({current[:12]}...). Re-extract against the current corpus."
+                )
+        covered = sum(len(ids) for ids in shard_entries.values())
+        if covered < len(partition_ids):
+            warnings.warn(
+                f"Only {covered}/{len(partition_ids)} {partition} proteins "
+                f"({covered / len(partition_ids):.1%}) have activations in {cache_dir}"
+                + ("" if manifest_fingerprint else " (manifest predates corpus stamping)")
+                + ".",
+                stacklevel=2,
+            )
 
         if not shard_entries:
             raise ValueError(
@@ -200,6 +241,7 @@ def build_partition_dataloader(
     remote_repo_id: str | None = None,
     remote_subpath: str | None = None,
     corpus_dir: str | Path = "data/processed",
+    remote_corpus_repo_id: str | None = None,
     remote_corpus_subpath: str = "corpus",
     num_workers: int = 0,
     max_cached_shards: int | None = None,
@@ -220,6 +262,7 @@ def build_partition_dataloader(
         remote_repo_id=remote_repo_id,
         remote_subpath=remote_subpath,
         corpus_dir=corpus_dir,
+        remote_corpus_repo_id=remote_corpus_repo_id,
         remote_corpus_subpath=remote_corpus_subpath,
         max_cached_shards=max_cached_shards,
         token=token,

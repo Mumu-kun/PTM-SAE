@@ -6,6 +6,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field
 
+from ptm_sae.runtime import anchor_path, resolve_data_root
+
 
 class WandbConfig(BaseModel):
     """Optional Weights & Biases logging, disabled unless explicitly turned on."""
@@ -86,6 +88,8 @@ class SAETrainingConfig(BaseModel):
     remote_repo_id: str | None = "mustafa-muhaimin/ptm-sae-dataset"
     remote_subpath: str | None = "activations/esm2_t33_650M_UR50D/layer_24"
     corpus_dir: str = "data/processed"
+    # The corpus tables live in their own Hub dataset, separate from the (much larger) activations.
+    remote_corpus_repo_id: str | None = "mustafa-muhaimin/ptm-sae-corpus"
     remote_corpus_subpath: str = "corpus"
     # LRU eviction below the full shard count guarantees re-downloading, not less disk usage:
     # every training epoch touches the entire partition in a freshly shuffled order, so any
@@ -119,3 +123,38 @@ class SAETrainingConfig(BaseModel):
         with open(yaml_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         return cls(**data)
+
+    def with_data_root(self, root: str | Path | None = None) -> "SAETrainingConfig":
+        """Copy with every on-disk path anchored under `root` (default: `resolve_data_root()`),
+        so one YAML with relative paths runs unchanged on a local PC, a remote GPU box with a big
+        data disk, Kaggle, or Colab. Absolute paths are left as-is."""
+        root = root or resolve_data_root()
+        anchored = {
+            field: anchor_path(getattr(self, field), root)
+            for field in ("cache_dir", "checkpoint_dir", "corpus_dir")
+        }
+        if self.resume_from is not None:
+            anchored["resume_from"] = anchor_path(self.resume_from, root)
+        return self.model_copy(update=anchored)
+
+    def with_overrides(self, overrides: list[str]) -> "SAETrainingConfig":
+        """Copy with `key=value` overrides applied (values parsed as YAML scalars, nested keys
+        dotted: `wandb.enabled=false`), re-validated as a whole."""
+        data = self.model_dump()
+        for item in overrides:
+            key, sep, raw = item.partition("=")
+            if not sep:
+                raise ValueError(f"Override {item!r} must look like key=value.")
+            *parents, leaf = key.split(".")
+            target = data
+            for parent in parents:
+                target = target.get(parent) if isinstance(target, dict) else None
+            if not isinstance(target, dict) or leaf not in target:
+                raise ValueError(f"Unknown config key in override: {key!r}.")
+            target[leaf] = yaml.safe_load(raw)
+
+        # Re-derive the cadence that model_post_init defaults from eval_interval_steps.
+        keys = {item.partition("=")[0] for item in overrides}
+        if "eval_interval_steps" in keys and "collapse_check_interval_steps" not in keys:
+            data["collapse_check_interval_steps"] = None
+        return type(self).model_validate(data)

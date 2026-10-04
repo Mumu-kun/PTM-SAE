@@ -27,7 +27,7 @@ NUM_RESIDUE_CLASSES = len(_AA_VOCAB) + 1
 
 def load_discovery_val_sequences(
     corpus_dir: str | Path,
-    remote_repo_id: str | None = None,
+    remote_corpus_repo_id: str | None = None,
     remote_corpus_subpath: str = "corpus",
     token: str | None = None,
 ) -> dict[str, str]:
@@ -35,13 +35,13 @@ def load_discovery_val_sequences(
     Mirrors `training.dataset.load_partition_ids`'s local-cache-then-remote-hydrate pattern."""
     local_path = Path(corpus_dir) / "corpus.parquet"
 
-    if not local_path.exists() and remote_repo_id:
+    if not local_path.exists() and remote_corpus_repo_id:
         resolved_token = resolve_hf_token(token)
         remote_path = f"{remote_corpus_subpath.rstrip('/')}/corpus.parquet"
 
         def _download() -> str:
             return hf_hub_download(
-                repo_id=remote_repo_id,
+                repo_id=remote_corpus_repo_id,
                 filename=remote_path,
                 repo_type="dataset",
                 token=resolved_token,
@@ -54,7 +54,7 @@ def load_discovery_val_sequences(
     if not local_path.exists():
         raise FileNotFoundError(
             f"corpus.parquet not found locally at {local_path} or on remote repository "
-            f"{remote_repo_id}."
+            f"{remote_corpus_repo_id}."
         )
 
     table = pq.read_table(local_path, columns=["uniprot_id", "sequence", "partition"])

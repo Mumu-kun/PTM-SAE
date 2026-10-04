@@ -1,16 +1,19 @@
 """Test suite for the partition-scoped streaming SafeTensors activation DataLoader."""
 
 import json
+import warnings
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 import safetensors.torch
 import torch
 
 from ptm_sae.training.dataset import (
     ActivationPartitionDataset,
     build_partition_dataloader,
+    corpus_fingerprint,
     load_partition_ids,
 )
 
@@ -193,3 +196,61 @@ def test_build_partition_dataloader_batches(tmp_path):
     assert total_rows == 7
     assert all(b.shape[1] == HIDDEN_DIM for b in batches)
     assert dataset.total_tokens == 7
+
+
+def _stamp_manifest(cache_dir: Path, fingerprint: str | None) -> None:
+    manifest_path = cache_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["corpus_fingerprint"] = fingerprint
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_corpus_fingerprint_tracks_discovery_rows_only(tmp_path):
+    _, corpus_dir = _write_fixture(tmp_path)
+    corpus_path = corpus_dir / "corpus.parquet"
+    base = corpus_fingerprint(corpus_path)
+
+    def rewrite(mutate):
+        rows = pq.read_table(corpus_path).to_pylist()
+        mutate(rows)
+        out = tmp_path / "variant.parquet"
+        pq.write_table(pa.Table.from_pylist(rows), out)
+        return corpus_fingerprint(out)
+
+    # held_out edits and unrelated columns do not change it...
+    assert rewrite(lambda rows: rows[3].update(sequence="DDDD", note="x")) == base
+    # ...a discovery sequence or a partition reassignment does.
+    assert rewrite(lambda rows: rows[0].update(sequence="AAT")) != base
+    assert rewrite(lambda rows: rows[0].update(partition="discovery_val")) != base
+
+
+def test_dataset_rejects_activations_from_a_different_corpus(tmp_path):
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    _stamp_manifest(cache_dir, "0" * 64)
+
+    with pytest.raises(ValueError, match="different corpus"):
+        ActivationPartitionDataset("discovery_train", cache_dir, corpus_dir=corpus_dir)
+
+
+def test_dataset_accepts_matching_corpus_stamp(tmp_path):
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    _stamp_manifest(cache_dir, corpus_fingerprint(corpus_dir / "corpus.parquet"))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        dataset = ActivationPartitionDataset(
+            "discovery_train", cache_dir, corpus_dir=corpus_dir
+        )
+    assert dataset.total_tokens == 7
+
+
+def test_dataset_warns_on_partial_coverage_of_legacy_manifest(tmp_path):
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    manifest_path = cache_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["entries"]["proteinC"]  # discovery_train protein with no activations
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.warns(UserWarning, match=r"1/2 discovery_train.*predates corpus stamping"):
+        ActivationPartitionDataset("discovery_train", cache_dir, corpus_dir=corpus_dir)
+

@@ -326,6 +326,7 @@ def run_sae_training(
             remote_repo_id=config.remote_repo_id,
             remote_subpath=config.remote_subpath,
             corpus_dir=config.corpus_dir,
+            remote_corpus_repo_id=config.remote_corpus_repo_id,
             remote_corpus_subpath=config.remote_corpus_subpath,
             max_cached_shards=config.max_cached_shards,
             num_workers=0,
@@ -364,7 +365,7 @@ def run_sae_training(
     if config.enable_collapse_check:
         collapse_labels = load_discovery_val_labels(
             corpus_dir=config.corpus_dir,
-            remote_repo_id=config.remote_repo_id,
+            remote_corpus_repo_id=config.remote_corpus_repo_id,
             remote_corpus_subpath=config.remote_corpus_subpath,
         )
 
@@ -372,7 +373,7 @@ def run_sae_training(
     if config.enable_residue_dominance_check:
         residue_dominance_sequences = load_discovery_val_sequences(
             corpus_dir=config.corpus_dir,
-            remote_repo_id=config.remote_repo_id,
+            remote_corpus_repo_id=config.remote_corpus_repo_id,
             remote_corpus_subpath=config.remote_corpus_subpath,
         )
 
@@ -400,6 +401,7 @@ def run_sae_training(
         remote_repo_id=config.remote_repo_id,
         remote_subpath=config.remote_subpath,
         corpus_dir=config.corpus_dir,
+        remote_corpus_repo_id=config.remote_corpus_repo_id,
         remote_corpus_subpath=config.remote_corpus_subpath,
         max_cached_shards=config.max_cached_shards,
         num_workers=config.num_workers,
@@ -413,6 +415,7 @@ def run_sae_training(
         remote_repo_id=config.remote_repo_id,
         remote_subpath=config.remote_subpath,
         corpus_dir=config.corpus_dir,
+        remote_corpus_repo_id=config.remote_corpus_repo_id,
         remote_corpus_subpath=config.remote_corpus_subpath,
         max_cached_shards=config.max_cached_shards,
         num_workers=0,
@@ -713,11 +716,27 @@ def main():
         help="Path to a previous run's checkpoint_dir root, overriding config.resume_from — "
         "keeps one YAML config reusable for both a fresh and a resumed invocation.",
     )
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        default=None,
+        help="Directory that relative cache_dir/corpus_dir/checkpoint_dir/resume_from hang off "
+        "(default: $PTM_SAE_DATA_ROOT, else the platform's writable area, else the repo root).",
+    )
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override a config field, repeatable (e.g. --set total_steps=2000 --set wandb.enabled=false).",
+    )
     args = parser.parse_args()
 
     cfg = SAETrainingConfig.from_yaml(args.config)
     if args.resume_from is not None:
         cfg = cfg.model_copy(update={"resume_from": args.resume_from})
+    cfg = cfg.with_overrides(args.overrides).with_data_root(args.data_root)
     run_sae_training(cfg)
 
 

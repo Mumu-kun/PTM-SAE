@@ -30,12 +30,14 @@ from ptm_sae.extraction.hub import publish_kaggle_dataset, resolve_hf_token
 from ptm_sae.extraction.pipeline import run_extraction_pipeline
 from ptm_sae.extraction.progress import PipelineProgressManager
 from ptm_sae.extraction.reader import SafeTensorsReader
-from ptm_sae.training.dataset import load_partition_ids
+from ptm_sae.training.dataset import corpus_fingerprint, load_partition_ids
+
+DEFAULT_CORPUS_REPO_ID = "mustafa-muhaimin/ptm-sae-corpus"
 
 
 def _load_published_corpus_proteins(
     corpus_dir: Path,
-    remote_repo_id: str | None,
+    remote_corpus_repo_id: str | None,
     remote_corpus_subpath: str,
     token: str | None,
 ) -> list[Protein]:
@@ -47,14 +49,14 @@ def _load_published_corpus_proteins(
     train_ids = load_partition_ids(
         "discovery_train",
         corpus_dir=corpus_dir,
-        remote_repo_id=remote_repo_id,
+        remote_corpus_repo_id=remote_corpus_repo_id,
         remote_corpus_subpath=remote_corpus_subpath,
         token=token,
     )
     val_ids = load_partition_ids(
         "discovery_val",
         corpus_dir=corpus_dir,
-        remote_repo_id=remote_repo_id,
+        remote_corpus_repo_id=remote_corpus_repo_id,
         remote_corpus_subpath=remote_corpus_subpath,
         token=token,
     )
@@ -90,6 +92,7 @@ def run_full_lifecycle(
     max_proteins: int | None = None,
     remote_repo_id: str | None = None,
     remote_subpath: str | None = None,
+    remote_corpus_repo_id: str | None = DEFAULT_CORPUS_REPO_ID,
     token: str | None = None,
     kaggle_username: str | None = None,
     progress_manager: PipelineProgressManager | None = None,
@@ -149,9 +152,12 @@ def run_full_lifecycle(
     else:
         target_proteins = _load_published_corpus_proteins(
             corpus_dir=processed_path,
-            remote_repo_id=resolved_repo,
+            remote_corpus_repo_id=remote_corpus_repo_id,
             remote_corpus_subpath="corpus",
             token=token,
+        )
+        config.sharding.corpus_fingerprint = corpus_fingerprint(
+            processed_path / "corpus.parquet"
         )
         pm.finish_stage(
             2,
@@ -280,6 +286,12 @@ def main():
         help="Hugging Face Dataset repo ID (e.g. 'username/ptm-activations')",
     )
     parser.add_argument(
+        "--remote-corpus-repo",
+        type=str,
+        default=DEFAULT_CORPUS_REPO_ID,
+        help="Hugging Face Dataset repo ID holding the published corpus tables",
+    )
+    parser.add_argument(
         "--remote-subpath",
         type=str,
         default=None,
@@ -310,6 +322,7 @@ def main():
         max_proteins=args.max_proteins,
         remote_repo_id=args.remote_repo,
         remote_subpath=args.remote_subpath,
+        remote_corpus_repo_id=args.remote_corpus_repo,
         kaggle_username=args.kaggle_username,
     )
 

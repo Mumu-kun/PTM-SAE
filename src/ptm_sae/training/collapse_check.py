@@ -56,7 +56,7 @@ StratumLabels = dict[str, dict[int, ResidueLabel]]
 def _hydrate_corpus_parquet(
     filename: str,
     corpus_dir: Path,
-    remote_repo_id: str | None,
+    remote_corpus_repo_id: str | None,
     remote_corpus_subpath: str,
     token: str | None,
     required: bool,
@@ -69,13 +69,13 @@ def _hydrate_corpus_parquet(
     """
     local_path = corpus_dir / filename
 
-    if not local_path.exists() and remote_repo_id:
+    if not local_path.exists() and remote_corpus_repo_id:
         resolved_token = resolve_hf_token(token)
         remote_path = f"{remote_corpus_subpath.rstrip('/')}/{filename}"
 
         def _download() -> str:
             return hf_hub_download(
-                repo_id=remote_repo_id,
+                repo_id=remote_corpus_repo_id,
                 filename=remote_path,
                 repo_type="dataset",
                 token=resolved_token,
@@ -95,14 +95,14 @@ def _hydrate_corpus_parquet(
             return None
         raise FileNotFoundError(
             f"{filename} not found locally at {local_path} or on remote repository "
-            f"{remote_repo_id}."
+            f"{remote_corpus_repo_id}."
         )
     return local_path
 
 
 def load_discovery_val_labels(
     corpus_dir: str | Path,
-    remote_repo_id: str | None = None,
+    remote_corpus_repo_id: str | None = None,
     remote_corpus_subpath: str = "corpus",
     token: str | None = None,
 ) -> StratumLabels:
@@ -123,7 +123,7 @@ def load_discovery_val_labels(
     corpus_path = _hydrate_corpus_parquet(
         "corpus.parquet",
         corpus_dir,
-        remote_repo_id,
+        remote_corpus_repo_id,
         remote_corpus_subpath,
         token,
         required=True,
@@ -131,7 +131,7 @@ def load_discovery_val_labels(
     labels_path = _hydrate_corpus_parquet(
         "labels_stratified.parquet",
         corpus_dir,
-        remote_repo_id,
+        remote_corpus_repo_id,
         remote_corpus_subpath,
         token,
         required=True,
@@ -139,7 +139,7 @@ def load_discovery_val_labels(
     exclusion_path = _hydrate_corpus_parquet(
         "exclusion_mask.parquet",
         corpus_dir,
-        remote_repo_id,
+        remote_corpus_repo_id,
         remote_corpus_subpath,
         token,
         required=False,
@@ -147,7 +147,7 @@ def load_discovery_val_labels(
     gold_path = _hydrate_corpus_parquet(
         "gold_negatives_nglyco.parquet",
         corpus_dir,
-        remote_repo_id,
+        remote_corpus_repo_id,
         remote_corpus_subpath,
         token,
         required=False,
