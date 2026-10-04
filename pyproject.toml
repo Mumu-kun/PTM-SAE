@@ -32,6 +32,11 @@ dev = [
 kaggle = [
     "kaggle>=1.6.0",
 ]
+# Notebook verification on a live Kaggle kernel (scripts/verify_notebooks.py): unofficial client,
+# the reviewed version is pinned.
+verify = [
+    "kgz==0.1.4",
+]
 # Jupyter server + kernel (remote GPU box) and nbconvert for the diagnostic report notebook.
 notebook = [
     "jupyter>=1.0.0",

@@ -1086,6 +1086,18 @@ wheels = [
 ]
 
 [[package]]
+name = "kgz"
+version = "0.1.4"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+dependencies = [
+    { name = "websocket-client" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/66/6a/0acc629049160b641bc009f8d353bff6af15b8e81fd7e25485d7975737c0/kgz-0.1.4.tar.gz", hash = "sha256:b49e85ca4fa43cf6813b9a1ea1744108525bcd58467dbbe45048da62ba752163" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/47/46/a67f36e3e04f1117555e7a32ddd2385f3817f7aed57606e60b753d08a032/kgz-0.1.4-py3-none-any.whl", hash = "sha256:216892105e13a058894791a07ec9195a827c1603d24605dfd4dddad501fedfc1" },
+]
+
+[[package]]
 name = "kiwisolver"
 version = "1.5.1"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
@@ -1902,6 +1914,9 @@ notebook = [
     { name = "jupyter" },
     { name = "nbconvert" },
 ]
+verify = [
+    { name = "kgz" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1914,6 +1929,7 @@ requires-dist = [
     { name = "ipykernel", marker = "extra == 'notebook'", specifier = ">=6.29.0" },
     { name = "jupyter", marker = "extra == 'notebook'", specifier = ">=1.0.0" },
     { name = "kaggle", marker = "extra == 'kaggle'", specifier = ">=1.6.0" },
+    { name = "kgz", marker = "extra == 'verify'", specifier = "==0.1.4" },
     { name = "matplotlib", specifier = ">=3.9.0" },
     { name = "nbconvert", marker = "extra == 'notebook'", specifier = ">=7.16.0" },
     { name = "numpy", specifier = ">=2.4.6" },
@@ -1933,7 +1949,7 @@ requires-dist = [
     { name = "wandb", specifier = ">=0.17.0" },
     { name = "wandb-workspaces", specifier = ">=0.1.10" },
 ]
-provides-extras = ["dev", "kaggle", "notebook"]
+provides-extras = ["dev", "kaggle", "verify", "notebook"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.16.6" }]

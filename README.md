@@ -164,6 +164,26 @@ Both notebooks are built so one failing cell cannot throw away a long run (the p
 - `PTM_SAE_MODE=smoke` runs the whole notebook on tiny/mock data in minutes; `real` is the full run. `PTM_SAE_PULL=0` stops the setup cell from fast-forwarding the checkout. Verify a notebook in smoke mode on the platform you will use before a long run.
 - The corpus notebook publishes to the Hub only after a verification cell passes (balance, homology audit, headline bars) and only when `PUBLISH` is on.
 
+### Verifying notebooks after code changes
+
+Unit tests cannot tell whether a notebook still runs on a platform (e.g. the install cell upgrading a package the kernel already imported only fails on Kaggle). After changing anything the notebooks depend on, run the smoke verification; it fingerprints `notebooks/`, `src/ptm_sae/`, `configs/` and `pyproject.toml` and re-runs only when they changed:
+
+```bash
+uv run --extra verify python scripts/verify_notebooks.py status                       # verified for the current code?
+uv run --extra verify python scripts/verify_notebooks.py run --target local  --if-changed   # headless, this machine
+uv run --extra verify python scripts/verify_notebooks.py run --target kaggle --if-changed   # live Kaggle kernel via kgz
+```
+
+The `kaggle` target syncs the working tree to your live Kaggle kernel, restarts it and executes the cells in order, stopping at the first uncaught error exactly as a Kaggle "Save & Run All" would, then checks `run_state.json`. The kernel URL is a credential: put it in `~/.kaggle_kernel_url` yourself (`read -s KURL`, paste at the hidden prompt, `printf '%s' "$KURL" > ~/.kaggle_kernel_url`) and never paste it anywhere else. Only after both targets pass, start a committed Kaggle run:
+
+```bash
+uv run --extra kaggle python scripts/kaggle_run.py push notebooks/kaggle_pipeline.ipynb --slug ptm-sae-corpus-build --mode real
+uv run --extra kaggle python scripts/kaggle_run.py status --slug ptm-sae-corpus-build
+uv run --extra kaggle python scripts/kaggle_run.py output --slug ptm-sae-corpus-build --out runs/corpus
+```
+
+A pushed notebook gets its code by cloning `main` from GitHub (push first), and its secrets (`HF_TOKEN`, `WANDB_API_KEY`, `GH_TOKEN`) must be attached to the notebook once in the Kaggle UI (Add-ons -> Secrets).
+
 ### Concurrent runs: sweeps and ablations
 
 An SAE needs far less than a GPU, so several training runs can share one card; the limits are CPU/data loading, RAM and, on Kaggle, the weekly GPU quota. Describe a sweep in YAML ([sweeps/example.yaml](sweeps/example.yaml)) and launch it:

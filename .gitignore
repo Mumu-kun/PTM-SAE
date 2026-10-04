@@ -41,3 +41,7 @@ scratch/
 # Notebook-generated diagnostic figures (re-created per run, not committed)
 notebooks/*_figures/
 notebooks/executed_*.ipynb
+
+# Notebook verification state (scripts/verify_notebooks.py)
+.verify_state.json
+.verify_logs/
