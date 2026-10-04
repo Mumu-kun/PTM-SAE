@@ -45,7 +45,7 @@ The chemical amino acid class defining the evaluation denominator for an SAE fea
 _Avoid_: Amino acid group, target residue class
 
 ### Corpus Partition
-The 3-way partition hierarchy (`discovery_train`, `discovery_val`, and `held_out`) assigned by clustering protein sequences at 40% sequence identity (CD-HIT) to prevent homology leakage. SAE dictionaries are trained strictly on `discovery_train` (~70% of tokens), hyperparameter tuning and TopK/L1 sparsity ablations are performed on `discovery_val` (~10% of tokens), and `held_out` (~20% of tokens) is strictly reserved as an unbiased non-homologous benchmark.
+The 3-way partition hierarchy (`discovery_train`, `discovery_val`, and `held_out`) assigned by clustering protein sequences at 40% sequence identity (CD-HIT) to prevent homology leakage, then solving one joint optimisation over whole clusters so the three partitions match on tokens, sites per PTM type, residues per stratum, cluster-size mix and labelled-protein share (`ptm_sae.data.splitting`), followed by a cd-hit-2d audit that merges any cluster pair still above 40% identity across a boundary. SAE dictionaries are trained strictly on `discovery_train` (~70% of tokens), hyperparameter tuning and TopK/L1 sparsity ablations are performed on `discovery_val` (~10% of tokens), and `held_out` (~20% of tokens) is strictly reserved as an unbiased non-homologous benchmark.
 _Avoid_: Train/test split, data fold
 
 ### Negative Tier
@@ -57,7 +57,7 @@ A per-type boolean exclusion flag marking residues where mass spectrometry pepti
 _Avoid_: Dropout mask, ignore flag
 
 ### Homology Cluster
-A group of protein sequences clustered at 40% sequence identity (via CD-HIT). The cluster is the indivisible atomic unit of dataset partitioning: all proteins in a cluster are assigned to either `discovery` or `held_out` to prevent homology leakage.
+A group of protein sequences clustered at 40% sequence identity (via CD-HIT). The cluster is the indivisible atomic unit of dataset partitioning: all proteins in a cluster land in the same Corpus Partition to prevent homology leakage.
 _Avoid_: Family group, sequence bucket
 
 ### Corpus Definition

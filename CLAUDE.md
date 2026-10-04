@@ -32,7 +32,7 @@ We are currently entering **Phase 2 & Phase 3**:
 1. **Sharded DataLoader (`src/ptm_sae/data/` or `src/ptm_sae/training/`)**:
    - PyTorch `IterableDataset` / DataLoader consuming SafeTensors activation shards via `SafeTensorsReader`.
    - On-demand shard hydration from `mustafa-muhaimin/ptm-sae-dataset` (corpus from `mustafa-muhaimin/ptm-sae-corpus`).
-   - Filtered strictly to `discovery_train` tokens (~5.08M tokens, 68% of corpus). `discovery_val` is for validation; `held_out` is reserved for Member 2.
+   - Filtered strictly to `discovery_train` tokens (~70% of corpus tokens; joint cluster-level split, see `docs/thesis-meeting-split-strategy.md`). `discovery_val` is for validation; `held_out` is reserved for Member 2.
 
 2. **SAE Model Implementations (`src/ptm_sae/models/`)**:
    - `TopKSAE`: Monolithic TopK baseline ($k=32, 64$, width 4,096 / 10,240).

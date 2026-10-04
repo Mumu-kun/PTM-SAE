@@ -85,7 +85,25 @@ Because sequence clustering groups homologous proteins together (e.g. 50% identi
 For our thesis architecture:
 1. **Primary Algorithm**: **Greedy Iterative Stratification** (Sechidis / Szymański) applied to **Homology Clusters**.
    - It is fast, deterministic, handles severe class imbalance (from 250k Phosphorylations to 800 O-GlcNAcylations), and directly satisfies **CF-16**.
-2. **Audit Verification**:
+2. **Audit Verification** (measured outcome below):
    After the greedy split finishes, emit a **Stratification Balance Diagnostic Table**:
    - Compare the realized proportion in `discovery` vs `held_out` for each individual PTM type.
    - If any rare PTM deviates by more than a pre-stated tolerance (e.g., target is 20.0%, realized is $<16\%$ or $>24\%$), trigger an automated fine-tuning pass using **SciPy MILP** or a local swap heuristic to rebalance the boundary clusters.
+
+---
+
+## 5. Outcome on the real corpus (superseding the greedy-first recommendation)
+
+Measured on the rebuilt corpus (18,128 proteins, 11,909 CD-HIT@40% clusters): greedy iterative
+stratification balanced per-type site shares reasonably (held-out 20.8-25.2% against a 20% target) but
+was never audited against the other properties that make partitions comparable. The train/val step,
+a token-size knapsack, left val with 94% singleton-cluster tokens (train 44%), a mean protein length
+of 196 aa (train 483 aa), and a mean 31% relative deviation from target across 37 balance features
+(17 features more than 25% off). The MILP cost concern above was real but acceptable for a one-off
+corpus build: a hybrid solve (150 largest clusters as integers, the long tail relaxed, then
+deterministic rounding and a local-search polish) takes about 3 minutes under 3 GB of RAM and reaches
+0.08% / 0.04% mean deviation for val / held-out (worst feature 0.6%). A full-integer model did not fit
+in memory, and the relaxed tail alone is degenerate (every target is trivially reachable
+fractionally), which is why the local-search polish does most of the fine balancing. The
+cluster-size mix is the feature greedy cannot see; it is now an explicit balance target. See
+`docs/thesis-meeting-split-strategy.md`.

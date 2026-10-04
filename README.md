@@ -73,10 +73,11 @@ ptm-sae-engine/
 2. **CPLM 4.0 Human PTMs**: 298,634 experimental/curated lysine modification events (ubiquitin, acetylation, succinylation, etc.).
 3. **UniProt Curated Features**: Glycosylation, phosphorylation, methylation, and lipidation features.
 4. **Sequence Invariant Enforcement**: Every site coordinate is checked against the canonical FASTA sequence (`sequence[pos - 1] == site.residue`). Isoform drift or coordinate mismatches are logged to `mismatch_audit.tsv`.
-5. **3-Way MILP Cluster Partition**:
-   - `discovery_train`: 8,894 proteins (67.95% tokens) — for unsupervised SAE dictionary learning.
-   - `discovery_val`: 3,240 proteins (9.72% tokens) — for SAE hyperparameter tuning and Pareto frontier evaluation.
-   - `held_out`: 5,995 proteins (22.33% tokens) — strictly reserved for non-homologous zero-shot evaluation.
+5. **Joint 3-Way Cluster Partition** (`ptm_sae.data.splitting`, details in `docs/thesis-meeting-split-strategy.md`): CD-HIT@40% clusters are assigned whole, by one MILP + local-search solve, so the partitions match on tokens, sites per PTM type, residues per stratum, cluster-size mix and labelled-protein share; a cd-hit-2d audit then merges any cluster pair still above 40% identity across a boundary.
+   - `discovery_train` (~70% of tokens): unsupervised SAE dictionary learning.
+   - `discovery_val` (~10% of tokens): SAE hyperparameter tuning, early stopping and the collapse canaries.
+   - `held_out` (~20% of tokens): strictly reserved for non-homologous evaluation.
+   - Re-split an already-built corpus without re-clustering: `uv run python -m ptm_sae.corpus.pipeline --resplit` (add `--skip-audit` where `cd-hit-2d` is unavailable).
 
 ---
 
@@ -122,6 +123,8 @@ uv run python -m ptm_sae.pipeline \
 
 ## Running Remotely (GPU box, Kaggle, Colab)
 
+**Which platform:** a run uses **one** platform, never both. Prefer the GPU box; use Kaggle only when the box is unavailable (Colab only if you need a GPU Kaggle cannot offer). The notebooks and CLIs behave identically on all of them, so switching is a matter of where you start the run. Runs do not hand off mid-way unless checkpoints are pushed to the Hub; otherwise restart on the other platform.
+
 The same code and YAML configs run everywhere. Code lives in git (`main`); data and checkpoints live under a **data root** that relative config paths hang off: `$PTM_SAE_DATA_ROOT`, else `/kaggle/working` on Kaggle, else the repo root.
 
 **Kaggle / Colab:** open [notebooks/kaggle_pipeline.ipynb](notebooks/kaggle_pipeline.ipynb) (corpus + activation extraction) or [notebooks/train_sae.ipynb](notebooks/train_sae.ipynb) (SAE training). The first cells clone the repo, install the dependencies declared in `pyproject.toml`, and discover secrets (`HF_TOKEN`, `WANDB_API_KEY`, `GH_TOKEN`) from the platform's secret store.
@@ -149,6 +152,30 @@ ssh -C -o ServerAliveInterval=30 -L 8888:localhost:8888 user@remote   # on your 
 ```
 
 The notebooks fast-forward an existing checkout (`git pull --ff-only --autostash`) and never force-reset it; restart the kernel after a pull that changed `src/`.
+
+### Notebooks that survive silly errors
+
+Both notebooks are built so one failing cell cannot throw away a long run (the point on Kaggle, where an unhandled error ends the version):
+
+- Every stage runs inside `with state.cell("name"):` ([ptm_sae.runtime](src/ptm_sae/runtime.py)). A failure is printed, recorded in `run_state.json` (data root) and the notebook continues; cells that depend on it skip with a reason.
+- Long jobs (corpus build, extraction, training) run as logged subprocesses (`logs/*.log` in the data root); their exit code is checked, never raised, so a crash or out-of-memory kill cannot take the notebook or its outputs down.
+- A preflight cell reports every environment problem at once (GPU, disk, internet, secrets by name, `cd-hit`) and degrades softly where safe (no `WANDB_API_KEY` -> W&B off).
+- The last cell always prints which cells completed and which files can be salvaged, even after failures.
+- `PTM_SAE_MODE=smoke` runs the whole notebook on tiny/mock data in minutes; `real` is the full run. `PTM_SAE_PULL=0` stops the setup cell from fast-forwarding the checkout. Verify a notebook in smoke mode on the platform you will use before a long run.
+- The corpus notebook publishes to the Hub only after a verification cell passes (balance, homology audit, headline bars) and only when `PUBLISH` is on.
+
+### Concurrent runs: sweeps and ablations
+
+An SAE needs far less than a GPU, so several training runs can share one card; the limits are CPU/data loading, RAM and, on Kaggle, the weekly GPU quota. Describe a sweep in YAML ([sweeps/example.yaml](sweeps/example.yaml)) and launch it:
+
+```bash
+uv run python -m ptm_sae.training.sweep --spec sweeps/example.yaml --dry-run      # preview the commands
+uv run python -m ptm_sae.training.sweep --spec sweeps/example.yaml --max-parallel 3 [--gpus 0,1]
+# choose --max-parallel from a measurement, not a guess:
+uv run python -m ptm_sae.training.sweep --benchmark --config configs/train_topk_baseline.yaml --levels 1,2,4
+```
+
+Each run gets its own checkpoint directory and W&B name/group/tags; a failed run is recorded and the others continue; re-launching resumes (finished runs skipped, interrupted ones continue from `latest/`); the end of the run prints a table of status, val MSE, explained variance, dead-latent fraction and throughput per run.
 
 ---
 
