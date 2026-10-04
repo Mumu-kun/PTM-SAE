@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ptm_sae.data.splitting import SplitSettings
 from ptm_sae.runtime import resolve_data_root
 
 
@@ -149,6 +150,11 @@ class Config:
     holdout_seed: int = 42
     holdout_stratify_by: str = "ptm_type"
     holdout_min_sites_per_type: int = 200
+
+    # Final 3-way partition (data/splitting.py), applied after M3 on the finished labels. Not part of
+    # config_fingerprint on purpose: it runs after the cached M2/M3 stages, so re-tuning it never
+    # re-runs CD-HIT.
+    split: SplitSettings = dataclasses.field(default_factory=SplitSettings)
 
     # Residue strata -> chemistry-valid target residues (M2/M3). Codes match N1 exactly: K, ST,
     # N, C, R, Y, E, M, W, Q -- do not translate these to full words (see ingestion.py's

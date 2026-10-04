@@ -217,11 +217,13 @@ def test_corpus_fingerprint_tracks_discovery_rows_only(tmp_path):
         pq.write_table(pa.Table.from_pylist(rows), out)
         return corpus_fingerprint(out)
 
-    # held_out edits and unrelated columns do not change it...
+    # held_out edits, unrelated columns and train<->val moves do not change it...
     assert rewrite(lambda rows: rows[3].update(sequence="DDDD", note="x")) == base
-    # ...a discovery sequence or a partition reassignment does.
+    assert rewrite(lambda rows: rows[0].update(partition="discovery_val")) == base
+    # ...a discovery sequence or the discovery set itself does.
     assert rewrite(lambda rows: rows[0].update(sequence="AAT")) != base
-    assert rewrite(lambda rows: rows[0].update(partition="discovery_val")) != base
+    assert rewrite(lambda rows: rows[0].update(partition="held_out")) != base
+    assert rewrite(lambda rows: rows[3].update(partition="discovery_train")) != base
 
 
 def test_dataset_rejects_activations_from_a_different_corpus(tmp_path):

@@ -1,6 +1,6 @@
 """Top-level orchestrator: M1 (acquisition) -> M2 (clustering) -> M3 (label cascade).
 
-Runnable via `python -m ptm_sae.corpus.pipeline [--mock] [--force]`. Ported from N1.ipynb's own
+Runnable via `python -m ptm_sae.corpus.pipeline [--mock] [--force] [--resplit]`. Ported from N1.ipynb's own
 cell sequence (cells 6, 9, 12, 15, 17); M_E (cell 8, exploratory diagnostics) is deliberately not
 ported -- it is optional tooling, not part of the output contract.
 
@@ -16,6 +16,7 @@ the real, full-scale build runs exclusively on Kaggle (a later stage, not part o
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import random
 
@@ -24,8 +25,13 @@ import pandas as pd
 from ptm_sae.corpus import acquisition, clustering, labels
 from ptm_sae.corpus.acquisition import CPLM_SPECIES_HUMAN
 from ptm_sae.corpus.config import CFG, CorpusPaths
-from ptm_sae.data.splitting import subdivide_discovery_clusters
+from ptm_sae.data.splitting import PARTITIONS, SplitSettings
 from ptm_sae.extraction.hub import HfSyncClient
+
+# verify_outputs tolerances: far looser than the ~0.1% / ~1% the splitter reaches, tight enough to
+# catch a regression to the old heuristic (31% mean / 100% max).
+MAX_MEAN_DEVIATION = 0.02
+MAX_FEATURE_DEVIATION = 0.05
 
 ARTIFACT_FILENAMES = [
     "corpus.parquet",
@@ -225,68 +231,177 @@ def _self_check(corpus: pd.DataFrame, result: dict) -> None:
     print("N1 structural self-check: OK")
 
 
+def _split_settings(mock: bool = False, audit: bool = True) -> SplitSettings:
+    """CFG.split, with the held-out site floor tied to the corpus-wide `holdout_min_sites_per_type`.
+    Mock mode relaxes every hard constraint: the synthetic corpus is far too small for them."""
+    settings = dataclasses.replace(
+        CFG.split,
+        held_min_sites=CFG.holdout_min_sites_per_type,
+        homology_audit=audit and CFG.split.homology_audit,
+    )
+    if not mock:
+        return settings
+    return dataclasses.replace(
+        settings,
+        token_tolerance=1.0,
+        held_min_sites=0,
+        val_min_sites=0,
+        min_type_sites=1,
+        max_cluster_share=1.1,
+    )
+
+
+def _apply_split(
+    corpus: pd.DataFrame, sites: pd.DataFrame, settings: SplitSettings
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Assigns the canonical `partition` (discovery_train / discovery_val / held_out) to the
+    corpus and its labels via the joint split in `clustering.assign_partitions`. Expects the
+    canonical `uniprot_id` schema. Clusters may come back merged by the homology audit."""
+    cluster_of, partition_of_cluster, report = clustering.assign_partitions(
+        corpus, sites, CFG.stratum_residues, settings, CFG.cdhit_identity
+    )
+    corpus = corpus.assign(cluster_id=corpus["uniprot_id"].map(cluster_of))
+    corpus["partition"] = corpus["cluster_id"].map(partition_of_cluster)
+    sites = sites.assign(cluster_id=sites["uniprot_id"].map(cluster_of))
+    sites["partition"] = sites["cluster_id"].map(partition_of_cluster)
+
+    assert set(corpus["partition"]) <= set(PARTITIONS), "protein without a partition"
+    assert not sites["partition"].isna().any(), "labelled site without a partition"
+    assert (corpus.groupby("cluster_id")["partition"].nunique() == 1).all(), (
+        "a homology cluster was split across partitions -- leakage bug"
+    )
+    report["cluster_to_partition"] = {int(c): p for c, p in partition_of_cluster.items()}
+    return corpus, sites, report
+
+
+def _write_split_outputs(
+    paths: CorpusPaths, corpus: pd.DataFrame, sites: pd.DataFrame, report: dict
+) -> None:
+    """Writes corpus.parquet / labels_stratified.parquet and adds the split provenance to
+    split_manifest.json next to the N1 keys M2 already wrote (`cluster_to_split` is N1's own
+    discovery/holdout assignment, kept for reproducibility)."""
+    corpus.to_parquet(paths.corpus_parquet, index=False)
+    sites.to_parquet(paths.labels_stratified, index=False)
+    manifest = (
+        json.loads(paths.split_manifest.read_text())
+        if paths.split_manifest.exists()
+        else {}
+    )
+    manifest.update(
+        {
+            key: report[key]
+            for key in ("split_version", "balance", "homology_audit", "cluster_to_partition")
+        }
+    )
+    paths.split_manifest.write_text(json.dumps(manifest, indent=2, default=str))
+
+
 def _finalize_output_schema(
-    corpus: pd.DataFrame, result: dict, paths: CorpusPaths
+    corpus: pd.DataFrame, result: dict, paths: CorpusPaths, mock: bool = False
 ) -> tuple[pd.DataFrame, dict]:
     """Renames N1's native `accession`/`split`/`type` columns to the canonical `uniprot_id`/
     `partition`/`ptm_type` schema `training/dataset.py` and `training/collapse_check.py` consume,
-    and subdivides N1's two-way `discovery`/`holdout` split into the three-way
-    `discovery_train`/`discovery_val`/`held_out` partition the training loop needs -- reusing
-    `subdivide_discovery_clusters` (already built for exactly this) rather than re-deriving a
-    split from scratch. Overwrites corpus.parquet/labels_stratified.parquet/exclusion_mask.parquet/
-    gold_negatives_nglyco.parquet under `paths.processed_dir` with the finalized schema."""
-    cluster_tokens = corpus.groupby("cluster_id")["length"].sum().to_dict()
-    cluster_profiles = {
-        cid: {"tokens": tokens} for cid, tokens in cluster_tokens.items()
-    }
-    discovery_cluster_ids = (
-        corpus.loc[corpus["split"] == "discovery", "cluster_id"].unique().tolist()
-    )
-    subdivision = subdivide_discovery_clusters(
-        cluster_profiles, discovery_cluster_ids, train_ratio=0.875
-    )
-
-    def _partition_for(row: pd.Series) -> str:
-        if row["split"] == "holdout":
-            return "held_out"
-        return subdivision.get(row["cluster_id"], "discovery_train")
-
-    corpus = corpus.copy()
-    corpus["partition"] = corpus.apply(_partition_for, axis=1)
-    corpus = corpus.drop(columns=["split"]).rename(columns={"accession": "uniprot_id"})
-    uid_to_partition = dict(
-        zip(corpus["uniprot_id"], corpus["partition"], strict=False)
-    )
-
-    labels_stratified = (
+    and replaces N1's two-way `discovery`/`holdout` split with the joint three-way
+    `discovery_train`/`discovery_val`/`held_out` partition (data/splitting.py). N1's own
+    assignment is kept as the `split_n1` column. Overwrites corpus.parquet/
+    labels_stratified.parquet/exclusion_mask.parquet/gold_negatives_nglyco.parquet under
+    `paths.processed_dir` with the finalized schema."""
+    corpus = corpus.rename(columns={"accession": "uniprot_id", "split": "split_n1"})
+    sites = (
         result["labels_stratified"]
         .drop(columns=["split"])
         .rename(columns={"accession": "uniprot_id", "type": "ptm_type"})
     )
-    labels_stratified["partition"] = labels_stratified["uniprot_id"].map(
-        uid_to_partition
-    )
+    corpus, sites, split_report = _apply_split(corpus, sites, _split_settings(mock))
 
-    exclusion_mask = result["exclusion_mask"].rename(
-        columns={"accession": "uniprot_id"}
-    )
+    exclusion_mask = result["exclusion_mask"].rename(columns={"accession": "uniprot_id"})
     gold_negatives = result["gold_negatives_n_glycosylation"].rename(
         columns={"accession": "uniprot_id"}
     )
 
-    corpus.to_parquet(paths.corpus_parquet, index=False)
-    labels_stratified.to_parquet(paths.labels_stratified, index=False)
+    _write_split_outputs(paths, corpus, sites, split_report)
     exclusion_mask.to_parquet(paths.exclusion_mask, index=False)
     if len(gold_negatives.columns):
         gold_negatives.to_parquet(paths.gold_negatives_nglyco, index=False)
 
     result = {
         **result,
-        "labels_stratified": labels_stratified,
+        "labels_stratified": sites,
         "exclusion_mask": exclusion_mask,
         "gold_negatives_n_glycosylation": gold_negatives,
     }
     return corpus, result
+
+
+def verify_outputs(paths: CorpusPaths | None = None, mock: bool = False) -> list[str]:
+    """Checks the finalized corpus against everything a publish must be able to promise and
+    returns the problems found (empty = safe to publish): all three partitions present, every
+    homology cluster inside one partition, the final homology audit clean, per-feature balance
+    within tolerance, and each primary PTM type above the headline bar in discovery. Mock builds
+    only get the structural checks, since the synthetic corpus cannot meet the real thresholds."""
+    paths = paths or CorpusPaths.from_env()
+    problems: list[str] = []
+    corpus = pd.read_parquet(paths.corpus_parquet)
+    sites = pd.read_parquet(paths.labels_stratified)
+    manifest = json.loads(paths.split_manifest.read_text())
+
+    # 1. Structure
+    present = set(corpus["partition"].dropna())
+    if present != set(PARTITIONS):
+        problems.append(f"partitions present {sorted(present)}, expected {list(PARTITIONS)}")
+    if corpus["partition"].isna().any():
+        problems.append("proteins without a partition")
+    if (corpus.groupby("cluster_id")["partition"].nunique() > 1).any():
+        problems.append("a homology cluster spans several partitions")
+    if sites["partition"].isna().any():
+        problems.append("labelled sites without a partition")
+    if mock:
+        return problems
+
+    # 2. Homology audit: the last pass must have run and found nothing
+    final_pass = (manifest.get("homology_audit") or [{}])[-1]
+    if final_pass.get("skipped"):
+        problems.append("homology audit was skipped")
+    elif final_pass.get("cross_partition_pairs", 1) > 0:
+        problems.append(f"{final_pass.get('cross_partition_pairs')} cross-partition pairs remain after the last audit pass")
+
+    # 3. Balance
+    for part, stats in manifest["balance"]["summary"].items():
+        if stats["mean_relative_deviation"] > MAX_MEAN_DEVIATION or stats["max_relative_deviation"] > MAX_FEATURE_DEVIATION:
+            problems.append(f"{part} balance off target: {stats}")
+
+    # 4. Headline bar per primary type, in discovery
+    in_discovery = sites[sites["partition"] != "held_out"]
+    for ptm_type in CFG.primary_types:
+        n_sites = int((in_discovery["ptm_type"] == ptm_type).sum())
+        if n_sites < CFG.min_sites_headline:
+            problems.append(f"{ptm_type}: {n_sites} discovery sites < headline bar {CFG.min_sites_headline}")
+    return problems
+
+
+def resplit(paths: CorpusPaths | None = None, audit: bool = True) -> dict:
+    """Re-runs only the final three-way split on an already-built corpus in
+    `paths.processed_dir`: no downloads, no CD-HIT clustering, no label cascade -- the clusters
+    and labels are already in corpus.parquet / labels_stratified.parquet. `audit=False` skips the
+    cd-hit-2d homology audit (recorded in the manifest) for machines without CD-HIT."""
+    paths = paths or CorpusPaths.from_env()
+    corpus = pd.read_parquet(paths.corpus_parquet)
+    sites = pd.read_parquet(paths.labels_stratified)
+    if "split_n1" not in corpus.columns:  # built before the joint split: N1 held out == held_out
+        corpus["split_n1"] = (corpus["partition"] == "held_out").map(
+            {True: "holdout", False: "discovery"}
+        )
+    corpus, sites, report = _apply_split(
+        corpus.drop(columns=["partition"]),
+        sites.drop(columns=["partition"]),
+        _split_settings(audit=audit),
+    )
+    _write_split_outputs(paths, corpus, sites, report)
+
+    print(f"Partitions: {corpus['partition'].value_counts().to_dict()}")
+    print(f"Balance (mean/max relative deviation): {report['balance']['summary']}")
+    print(f"Homology audit: {report['homology_audit']}")
+    return report
 
 
 def run(mock: bool = False, force: bool = False) -> dict:
@@ -324,12 +439,13 @@ def run(mock: bool = False, force: bool = False) -> dict:
 
     _self_check(corpus, result)
 
+    corpus, result = _finalize_output_schema(corpus, result, paths, mock=mock)
+    print(f"Finalized partitions: {corpus['partition'].value_counts().to_dict()}")
+
+    final_labels = result["labels_stratified"]
     discovery_headline_ok = {
         t: bool(
-            result["labels_stratified"][
-                (result["labels_stratified"]["type"] == t)
-                & (result["labels_stratified"]["split"] == "discovery")
-            ].shape[0]
+            ((final_labels["ptm_type"] == t) & (final_labels["partition"] != "held_out")).sum()
             >= CFG.min_sites_headline
         )
         for t in CFG.primary_types
@@ -340,15 +456,13 @@ def run(mock: bool = False, force: bool = False) -> dict:
     if not all(discovery_headline_ok.values()) and not mock:
         print(
             "ACTION REQUIRED: at least one primary type falls below 1,000 discovery-partition "
-            "sites. Reduce CFG.holdout_fraction to 0.15 and re-run M2+M3 before proceeding."
+            "sites. Lower the held-out token share in CFG.split.fractions (e.g. to 0.15) and "
+            "re-run with --resplit before proceeding."
         )
     if mock:
         print(
             "(mock mode: the headline gate is expected to fail on this tiny synthetic corpus.)"
         )
-
-    corpus, result = _finalize_output_schema(corpus, result, paths)
-    print(f"Finalized partitions: {corpus['partition'].value_counts().to_dict()}")
 
     print(
         f"\nRequired artifacts written under {paths.processed_dir}: corpus.parquet, "
@@ -375,7 +489,21 @@ def main() -> None:
     parser.add_argument(
         "--force", action="store_true", help="Ignore every cache; rebuild from scratch."
     )
+    parser.add_argument(
+        "--resplit",
+        action="store_true",
+        help="Only re-run the final train/val/held-out split on the existing corpus.parquet and "
+        "labels_stratified.parquet (no downloads, no CD-HIT clustering).",
+    )
+    parser.add_argument(
+        "--skip-audit",
+        action="store_true",
+        help="With --resplit: skip the cd-hit-2d homology audit (for machines without CD-HIT).",
+    )
     args = parser.parse_args()
+    if args.resplit:
+        resplit(audit=not args.skip_audit)
+        return
     run(mock=args.mock, force=args.force)
 
 

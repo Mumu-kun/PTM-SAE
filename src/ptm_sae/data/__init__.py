@@ -17,13 +17,11 @@ from ptm_sae.data.schema import (
     PTMObservation,
     UnifiedResidueSite,
 )
-from ptm_sae.data.splitting import build_cluster_profiles
 
 __all__ = [
     "PTMObservation",
     "Protein",
     "UnifiedResidueSite",
-    "build_cluster_profiles",
     "fetch_uniprot_human_proteome",
     "get_stratum_for_residue",
     "parse_uniprot_fasta",

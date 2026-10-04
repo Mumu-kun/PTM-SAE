@@ -21,13 +21,14 @@ Partition = Literal["discovery_train", "discovery_val"]
 
 
 def corpus_fingerprint(corpus_parquet: str | Path) -> str:
-    """SHA-256 identity of the corpus content that activations depend on: every discovery
-    protein's (uniprot_id, partition, sequence). `held_out` rows and label columns are left out,
-    so rebuilding labels or Member 2's held-out set does not invalidate extracted activations,
-    while any change to the discovery split or a discovery sequence does."""
+    """SHA-256 identity of the corpus content that activations depend on: the (uniprot_id,
+    sequence) of every discovery protein (train and val alike -- an activation does not depend on
+    which side of discovery its protein sits on). `held_out` rows and label columns are left out,
+    so rebuilding labels or re-splitting train/val does not invalidate extracted activations,
+    while any change to the discovery set or a discovery sequence does."""
     table = pq.read_table(corpus_parquet, columns=["uniprot_id", "partition", "sequence"])
     rows = sorted(
-        (r["uniprot_id"], r["partition"], r["sequence"])
+        (r["uniprot_id"], r["sequence"])
         for r in table.to_pylist()
         if r["partition"] in ("discovery_train", "discovery_val")
     )
