@@ -66,3 +66,12 @@ def test_no_heavy_package_is_imported_before_the_install_cell(name):
     for index, source in enumerate(cells[:install]):
         for heavy in ("import torch", "import numpy", "import pandas", "import pyarrow", "import scipy", "from ptm_sae.training", "from ptm_sae.corpus", "from ptm_sae.data"):
             assert heavy not in source, f"{name} cell {index} imports {heavy!r} before dependencies are installed"
+
+
+@pytest.mark.parametrize("name", NOTEBOOKS)
+def test_a_failed_clone_cannot_print_the_github_token(name):
+    """The clone URL embeds the token; subprocess errors repr the whole command line."""
+    setup = next(src for src in _code_cells(name) if "x-access-token" in src)
+
+    assert "capture_output=True" in setup and "from None" in setup
+    assert "except subprocess.CalledProcessError" in setup
