@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from ptm_sae import runtime
 from ptm_sae.extraction.hub import HfSyncClient, compute_sha256
 from ptm_sae.training.config import SAETrainingConfig
 from ptm_sae.training.dataset import ActivationPartitionDataset, Partition
@@ -156,6 +157,7 @@ def sync_data(
 
 
 def main():
+    runtime.ensure_utf8_output()
     parser = argparse.ArgumentParser(
         description="Download/verify the corpus tables and activation shards a training config reads."
     )

@@ -17,6 +17,7 @@ from pathlib import Path
 import torch
 from transformers import get_cosine_schedule_with_warmup
 
+from ptm_sae import runtime
 from ptm_sae.extraction.hub import resolve_wandb_api_key
 from ptm_sae.extraction.progress import PipelineProgressManager
 from ptm_sae.models import (
@@ -756,6 +757,7 @@ def run_sae_training(
 
 
 def main():
+    runtime.ensure_utf8_output()
     parser = argparse.ArgumentParser(
         description="Train a baseline SAE (TopK, JumpReLU, BatchTopK, or Gated)"
     )

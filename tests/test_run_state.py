@@ -137,3 +137,32 @@ def test_preflight_passes_when_the_environment_is_complete(monkeypatch):
     report = runtime.preflight(need_cdhit=True, check_internet=False)
 
     assert report.ok and not report.degraded
+
+
+def test_logged_children_can_print_unicode_even_when_the_parent_uses_a_legacy_encoding(
+    monkeypatch, tmp_path
+):
+    """The training progress cards print box-drawing characters; on Windows a pipe defaults to
+    cp1252 and that used to kill the run with UnicodeEncodeError."""
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    code = "print('card \u2500\u2502\u250c done')"
+
+    exit_code = runtime.run_logged([sys.executable, "-c", code], tmp_path / "unicode.log")
+
+    assert exit_code == 0
+    assert "─│┌" in (tmp_path / "unicode.log").read_text(encoding="utf-8")
+
+
+def test_ensure_utf8_output_makes_a_legacy_stream_non_raising(monkeypatch):
+    import io
+
+    legacy = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", legacy)
+    monkeypatch.setattr(sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
+
+    runtime.ensure_utf8_output()
+    print("─│ box drawing")  # raises UnicodeEncodeError on a cp1252 stream
+    legacy.flush()
+
+    assert legacy.encoding == "utf-8"

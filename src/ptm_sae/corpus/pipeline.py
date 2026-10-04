@@ -22,6 +22,7 @@ import random
 
 import pandas as pd
 
+from ptm_sae import runtime
 from ptm_sae.corpus import acquisition, clustering, labels
 from ptm_sae.corpus.acquisition import CPLM_SPECIES_HUMAN
 from ptm_sae.corpus.config import CFG, CorpusPaths
@@ -478,6 +479,7 @@ def run(mock: bool = False, force: bool = False) -> dict:
 
 
 def main() -> None:
+    runtime.ensure_utf8_output()
     parser = argparse.ArgumentParser(
         description="Build the N1-derived PTM corpus (M1 -> M2 -> M3)."
     )

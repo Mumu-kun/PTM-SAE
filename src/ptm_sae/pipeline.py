@@ -255,6 +255,7 @@ def run_full_lifecycle(
 
 
 def main():
+    runtime.ensure_utf8_output()
     parser = argparse.ArgumentParser(
         description="Run Full Lifecycle Pipeline (Resolve Corpus -> Extract -> Sync -> Verify)"
     )

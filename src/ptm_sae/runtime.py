@@ -250,6 +250,15 @@ class RunState:
                 print(f"  {path.relative_to(directory)}  ({path.stat().st_size / 1e6:.2f} MB)")
 
 
+def ensure_utf8_output() -> None:
+    """Makes stdout/stderr UTF-8 and non-raising. The training progress cards and tqdm bars print
+    box-drawing characters; on Windows, with output going to a pipe or a file, the default cp1252
+    encoding raises UnicodeEncodeError and kills a long run over a cosmetic character."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def run_logged(
     cmd: list[str],
     log_path: str | Path,
@@ -262,9 +271,11 @@ def run_logged(
     elapsed (the job is terminated), and never raises on a failing job."""
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Children print Unicode (progress bars, cards): force UTF-8 mode so a Windows pipe cannot crash them.
+    child_env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", **(env or {})}
     proc = subprocess.Popen(  # noqa: S603 -- caller-supplied argv, never a shell string
-        cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, errors="replace", bufsize=1,
+        cmd, cwd=cwd, env=child_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", bufsize=1,
     )  # fmt: skip
     timed_out = threading.Event()
 

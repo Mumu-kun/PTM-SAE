@@ -25,6 +25,7 @@ from pathlib import Path
 
 import yaml
 
+from ptm_sae import runtime
 from ptm_sae.runtime import resolve_data_root
 
 THROUGHPUT = re.compile(r"([\d,]+) tok/s")
@@ -236,6 +237,7 @@ def _parse_set(items: list[str]) -> dict:
 
 
 def main() -> None:
+    runtime.ensure_utf8_output()
     parser = argparse.ArgumentParser(description="Launch concurrent SAE training runs (sweeps, ablations).")
     parser.add_argument("--spec", type=str, help="Sweep spec YAML (see sweeps/example.yaml)")
     parser.add_argument("--max-parallel", type=int, default=None, help="Concurrent runs (default: spec, else a CPU-based guess)")
