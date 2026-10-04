@@ -130,7 +130,7 @@ The same code and YAML configs run everywhere. Code lives in git (`main`); data 
 
 ```bash
 git clone https://github.com/Mumu-kun/PTM-SAE.git && cd PTM-SAE   # any folder name works
-uv sync --group notebook                      # locked env; keeps the CUDA torch build
+uv sync --extra notebook                      # locked env; keeps the CUDA torch build
 export PTM_SAE_DATA_ROOT=/path/to/big/disk    # optional: where cache/, checkpoints/ go
 
 # Pre-download over the (possibly slow) link before training; resumable and idempotent.

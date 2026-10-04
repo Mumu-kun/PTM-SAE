@@ -47,12 +47,17 @@ class JumpReLUSAEConfig(SAEConfig):
         self,
         d_in: int = 1280,
         d_hidden: int = 4096,
-        bandwidth: float = 1e-3,
+        bandwidth: float = 2.0,
         init_threshold: float = 0.001,
+        activation_scale: float = 1.0,
         **kwargs,
     ):
         self.bandwidth = bandwidth
         self.init_threshold = init_threshold
+        # Rescales inputs internally so bandwidth/init_threshold operate at the scale the
+        # literature calibrates them for (E[||x||^2]=1), regardless of the raw activation
+        # magnitude this SAE is actually fed. 1.0 is a no-op — see modeling_sae.py's forward().
+        self.activation_scale = activation_scale
         super().__init__(d_in=d_in, d_hidden=d_hidden, **kwargs)
 
 
@@ -93,3 +98,10 @@ class GatedSAEConfig(SAEConfig):
     """
 
     model_type = "ptm-sae-gated"
+
+    def __init__(self, d_in: int = 1280, d_hidden: int = 4096, activation_scale: float = 1.0, **kwargs):
+        # Same role as JumpReLUSAEConfig.activation_scale — keeps the gate's L1 penalty and
+        # magnitude path operating at a consistent, literature-comparable input scale. 1.0 is a
+        # no-op, so this is inert unless explicitly set.
+        self.activation_scale = activation_scale
+        super().__init__(d_in=d_in, d_hidden=d_hidden, **kwargs)

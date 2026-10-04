@@ -1,29 +1,30 @@
 # JumpReLU SAE baseline — ESM-2 650M, Layer 24 (d_in=1280), discovery_train.
-# Recipe follows Rajamanoharan et al., 2024 (DeepMind): Adam, warmup+cosine LR, L0 coefficient
-# warmed up separately over its own schedule.
+# Recipe: Anthropic's tanh+pre-act loss (circuits update, Jan 2025), replacing the original
+# Rajamanoharan et al. (2024) L0-pseudo-count loss — that formulation is reported to need
+# ~2B tokens to reliably converge (our first run, j3futvdl-derived 6titmmxz, saw ~100M tokens
+# and collapsed to a fully dense code: train/l0 climbed to 2919/4096, every latent packed into
+# the top 2 of 20 log-density histogram bins). Values below are the doc's stated defaults —
+# a starting point for the quick-diagnostic sweep (notebooks/train_sae.ipynb), not final.
 
 sae_type: jumprelu
 d_in: 1280
 d_hidden: 4096
 
-# bandwidth=0.001 (run j3futvdl) starved the threshold's straight-through pseudo-derivative:
-# it only receives gradient from latents whose pre-activation falls within bandwidth/2 of the
-# current threshold (modeling_sae.py's _JumpReLUSTE/_HeavisideSTE kernel), and that run's
-# train/threshold_std stayed ~3.5e-5 (never moved off init_threshold) while train/l0 plateaued
-# at ~2850/4096 — the window was too narrow to reach a meaningful fraction of latents on ESM-2
-# layer-24 activation scale. Widened 20x so threshold actually receives signal; watch
-# train/threshold_std diverge across latents in the first ~1-2k steps as the check that this
-# worked, not just train/l0 trending down.
-bandwidth: 0.02
+# Raw ESM-2 layer-24 activations are NOT pre-normalized anywhere in this pipeline, but
+# bandwidth/init_threshold (and this recipe's STE) are calibrated for E[||x||^2]=1 — train.py
+# computes and applies activation_scale automatically from a real activation sample, so these
+# two values are meaningful as literally written here.
+bandwidth: 2.0
 init_threshold: 0.001
 
-# l0_coefficient has no safe default — it's the reconstruction/sparsity tradeoff knob, the
-# one you'd actually sweep per ablation run. Raised 5x from j3futvdl's 0.001: with the wider
-# bandwidth above now actually letting gradient reach the threshold, a stronger penalty is
-# needed to pull L0 down instead of just amplifying gradient for the same starved sliver of
-# latents. Still a starting point to re-tune, not a final value.
-l0_coefficient: 0.005
-l0_warmup_steps: 3000
+# Sparsity loss: lambda_S * sum(tanh(sparsity_tanh_c * |f_i(x)| * ||W_dec,i||)). No safe
+# default for sparsity_coefficient — sweep it (20 is the doc's own "reasonable default").
+# Ramped linearly over the ENTIRE run (not a short warmup fraction) — see train.py::_total_loss.
+sparsity_coefficient: 20
+sparsity_tanh_c: 4.0
+# Pre-act loss: preact_coefficient * sum(ReLU(exp(t) - f_i(x)) * ||W_dec,i||) — gives dead/
+# inactive latents a gradient nudge toward firing.
+preact_coefficient: 0.000003
 
 # Measured on real Kaggle GPU session: 55,345 tok/s at width=4096. ~5.08M discovery_train
 # tokens / batch_size below ≈ ~1,240 steps/epoch ≈ 92s/epoch. 24,000 steps ≈ 20 epochs ≈ ~30
@@ -31,19 +32,22 @@ l0_warmup_steps: 3000
 # are still improving at the end. Kept equal to the TopK config's total_steps for a fair
 # same-budget comparison between the two architectures.
 total_steps: 24000
-learning_rate: 0.00007
+learning_rate: 0.0002
 warmup_steps: 1000
 batch_size: 4096
 dtype: fp32
 seed: 0
+# Anthropic's recipe clips grad norm — cheap insurance for threshold-parameter stability, at
+# no cost to reconstruction quality.
+grad_clip_norm: 1.0
 
 dead_latent_window_tokens: 500000
 eval_interval_steps: 500
 checkpoint_dir: checkpoints/jumprelu_w4096
 save_all_checkpoints: false
 
-# Tier 3 Residue Collapse canary: ptm_sites.jsonl exists (data/processed/, and via the remote
-# HF dataset fallback for Kaggle).
+# Tier 3 Residue Collapse canary: reads the Parquet corpus tables (published to
+# mustafa-muhaimin/ptm-sae-corpus, hydrated into corpus_dir on demand).
 enable_collapse_check: true
 collapse_check_interval_steps: 2000
 

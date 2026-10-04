@@ -15,10 +15,12 @@ dependencies = [
     "scipy>=1.17.1",
     "requests>=2.34.2",
     "wandb>=0.17.0",
+    "wandb-workspaces>=0.1.10",
     "pandas>=3.0.6",
     "numpy>=2.4.6",
     "pyarrow>=25.0.1",
     "openpyxl>=3.1.5",
+    "matplotlib>=3.9.0",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +31,12 @@ dev = [
 # Publishing the corpus / activation datasets to Kaggle (notebooks/kaggle_pipeline.ipynb).
 kaggle = [
     "kaggle>=1.6.0",
+]
+# Jupyter server + kernel (remote GPU box) and nbconvert for the diagnostic report notebook.
+notebook = [
+    "jupyter>=1.0.0",
+    "nbconvert>=7.16.0",
+    "ipykernel>=6.29.0",
 ]
 
 [build-system]
@@ -45,11 +53,6 @@ pythonpath = ["src"]
 [dependency-groups]
 dev = [
     "ruff>=0.16.6",
-]
-# Jupyter kernel + server for running the notebooks on a remote GPU box.
-notebook = [
-    "ipykernel>=6.29.0",
-    "jupyterlab>=4.0.0",
 ]
 
 [tool.ruff]

@@ -84,6 +84,8 @@ def _build_model(config: SAETrainingConfig) -> SAEModel:
     if config.sae_type == "gated":
         return GatedSAEModel(GatedSAEConfig(d_in=config.d_in, d_hidden=config.d_hidden))
 
+    # activation_scale stays at its default (1.0) here — run_sae_training sets it separately,
+    # once a real activation sample is available, right before initialize_bias_from_data.
     return JumpReLUSAEModel(
         JumpReLUSAEConfig(
             d_in=config.d_in,
@@ -161,11 +163,25 @@ def _total_loss(
         return loss
 
     if config.sae_type == "jumprelu":
-        # L0 coefficient is linearly warmed up over its own schedule, separate from the LR
-        # warmup (Rajamanoharan et al., 2024 warm it up over 10k steps / 40M tokens to avoid
-        # collapsing every latent to zero before the SAE has learned anything reconstructive).
-        ramped_l0_coef = config.l0_coefficient * min(1.0, step / max(1, config.l0_warmup_steps))
-        return out.mse_loss + ramped_l0_coef * out.l0
+        # Anthropic's tanh+pre-act loss (circuits update, Jan 2025), replacing the original
+        # L0-pseudo-count loss (reported to need ~2B tokens to reliably converge). Feature
+        # magnitude is redefined as f_i(x) * ||W_dec,i|| — decoder norm is deliberately left
+        # unconstrained for this architecture (see the skipped normalize_decoder_() call in the
+        # training loop below) so it can act as a trained per-latent importance/gain term.
+        w_dec_norms = model.W_dec.norm(dim=-1)
+        feature_mag = out.latents.abs() * w_dec_norms
+        sparsity_loss = torch.tanh(config.sparsity_tanh_c * feature_mag).sum(dim=-1).mean()
+
+        threshold = model.log_threshold.exp()
+        preact_loss = (torch.relu(threshold - out.latents) * w_dec_norms).sum(dim=-1).mean()
+
+        # Ramped linearly over the ENTIRE run (not a short warmup fraction) per the doc's guidance.
+        ramped_sparsity_coef = config.sparsity_coefficient * (step / config.total_steps)
+        return (
+            out.mse_loss
+            + ramped_sparsity_coef * sparsity_loss
+            + config.preact_coefficient * preact_loss
+        )
 
     # gated: Eq. 8 (Rajamanoharan et al., 2024a) — main MSE + lambda*L1(gate) + aux reconstruction,
     # the auxiliary term added at weight 1 directly, no separate coefficient in the paper's loss.
@@ -198,6 +214,18 @@ def _architecture_specific_metrics(config: SAETrainingConfig, model: SAEModel, o
         threshold = model.log_threshold.exp()
         metrics["threshold_mean"] = threshold.mean().item()
         metrics["threshold_std"] = threshold.std().item()
+        # Decoder norm is no longer held at 1.0 for this architecture (unit-norm constraint and
+        # gradient-parallel-component removal are both skipped below) — it's a live, trained
+        # per-latent importance term now, so its drift away from its ~1.0 starting point is a
+        # meaningful health signal in its own right.
+        w_dec_norms = model.W_dec.norm(dim=-1)
+        metrics["decoder_norm_mean"] = w_dec_norms.mean().item()
+        metrics["decoder_norm_std"] = w_dec_norms.std().item()
+        feature_mag = out.latents.abs() * w_dec_norms
+        metrics["sparsity_loss"] = torch.tanh(config.sparsity_tanh_c * feature_mag).sum(dim=-1).mean().item()
+        metrics["preact_loss"] = (
+            (torch.relu(threshold - out.latents) * w_dec_norms).sum(dim=-1).mean().item()
+        )
     return metrics
 
 
@@ -340,7 +368,21 @@ def run_sae_training(
             bias_init_tokens += batch.shape[0]
             if bias_init_tokens >= 50_000:
                 break
-        model.initialize_bias_from_data(torch.cat(bias_init_sample).to(device))
+        bias_init_activations = torch.cat(bias_init_sample).to(device)
+
+        # bandwidth/init_threshold (JumpReLU) and the gate/magnitude thresholds (Gated) are
+        # calibrated for E[||x||^2]=1, but real ESM-2 activations are never normalized upstream
+        # of this — compute and apply the one scalar that closes that gap, from the same real
+        # sample used to seed b_dec below. (On resume, from_pretrained already restored this
+        # from the checkpoint's saved config, so nothing to compute here.)
+        if config.sae_type in ("jumprelu", "gated"):
+            model.config.activation_scale = (
+                1.0 / bias_init_activations.pow(2).sum(dim=-1).mean().sqrt()
+            ).item()
+
+        model.initialize_bias_from_data(bias_init_activations)
+
+    activation_scale = getattr(model.config, "activation_scale", None)
 
     wandb_run = None
     if config.wandb.enabled:
@@ -360,6 +402,8 @@ def run_sae_training(
             id=resumed_run_id,
             resume="must" if resumed_run_id is not None else None,
         )
+        if activation_scale is not None:
+            wandb_run.config.update({"activation_scale": activation_scale})
 
     collapse_labels = None
     if config.enable_collapse_check:
@@ -489,7 +533,12 @@ def run_sae_training(
             loss.backward()
             if config.grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip_norm)
-            model.remove_decoder_gradient_parallel_component_()
+            # JumpReLU's tanh+pre-act loss deliberately leaves decoder norm unconstrained (it's
+            # folded into the loss as a trained per-latent importance term — see _total_loss) —
+            # both the unit-norm constraint and its paired gradient-projection trick would fight
+            # that directly, so both are skipped for this architecture only.
+            if config.sae_type != "jumprelu":
+                model.remove_decoder_gradient_parallel_component_()
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
@@ -497,7 +546,8 @@ def run_sae_training(
             # step ended at norm 1, this mean is exactly how far this step's update pushed
             # decoder directions away from unit norm — a cheap per-step stability signal.
             decoder_pre_norm_mean = model.W_dec.norm(dim=-1).mean().item()
-            model.normalize_decoder_()
+            if config.sae_type != "jumprelu":
+                model.normalize_decoder_()
 
             fired = out.latents.detach().gt(0).any(dim=0)
             tokens_since_fired += batch.shape[0]
