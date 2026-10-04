@@ -12,6 +12,7 @@ longer exists. That caller (and `PTMCorpus`/`solve_milp_partition` alongside it)
 wholesale in Stage 2 of the plan, not patched here.
 """
 
+import os
 import re
 from pathlib import Path
 
@@ -90,7 +91,7 @@ def parse_uniprot_fasta(
         flush()
 
     if isinstance(fasta_path_or_text, Path) or (
-        isinstance(fasta_path_or_text, str) and Path(fasta_path_or_text).exists()
+        isinstance(fasta_path_or_text, str) and os.path.exists(fasta_path_or_text)
     ):
         with open(fasta_path_or_text, encoding="utf-8") as file_handle:
             _consume(file_handle)
