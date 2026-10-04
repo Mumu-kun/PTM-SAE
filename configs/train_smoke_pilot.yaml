@@ -1,0 +1,38 @@
+# Smoke profile: 200-step TopK run on the ESM-2 8M pilot activations (500 proteins, d_in=320).
+# Exercises the whole path (sync, train, evaluate, canaries, checkpoint) in about a minute on a
+# T4; used by the notebooks' PTM_SAE_MODE=smoke. Not a result.
+
+sae_type: topk
+d_in: 320
+d_hidden: 1024
+k: 16
+
+total_steps: 200
+learning_rate: 0.0004
+batch_size: 1024
+dtype: fp32
+seed: 0
+
+dead_latent_window_tokens: 100000
+eval_interval_steps: 50
+checkpoint_dir: checkpoints/smoke
+save_all_checkpoints: false
+
+enable_collapse_check: true
+collapse_check_interval_steps: 100
+enable_residue_dominance_check: true
+
+cache_dir: cache/activations/pilot_8m
+remote_repo_id: mustafa-muhaimin/ptm-sae-corpus
+remote_subpath: activations/esm2_t6_8M_UR50D/layer_4
+remote_corpus_repo_id: mustafa-muhaimin/ptm-sae-corpus
+remote_corpus_subpath: corpus
+corpus_dir: data/processed
+num_workers: 0
+shuffle_buffer_size: 65536
+
+wandb:
+  enabled: false
+  project: ptm-sae
+  run_name: smoke_pilot
+  tags: [smoke]

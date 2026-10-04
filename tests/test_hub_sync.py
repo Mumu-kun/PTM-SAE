@@ -24,6 +24,9 @@ from ptm_sae.extraction.sharder import SafeTensorsSharder
 
 
 def test_resolve_hf_token_cascade(monkeypatch):
+    # Never consult a real Kaggle/Colab secret store, whatever machine runs the tests.
+    monkeypatch.setattr("ptm_sae.runtime.detect_platform", lambda: "local")
+
     # 1. Explicit token takes highest priority
     monkeypatch.setenv("HF_TOKEN", "env_token_val")
     assert resolve_hf_token("explicit_token_val") == "explicit_token_val"

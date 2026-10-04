@@ -23,7 +23,9 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
+from ptm_sae import runtime
 from ptm_sae.config import PipelineConfig
+from ptm_sae.corpus.config import CorpusPaths
 from ptm_sae.data import parse_uniprot_fasta
 from ptm_sae.data.schema import Protein
 from ptm_sae.extraction.hub import publish_kaggle_dataset, resolve_hf_token
@@ -113,7 +115,7 @@ def run_full_lifecycle(
     pm = progress_manager or PipelineProgressManager()
     pm.start_pipeline()
 
-    processed_path = Path("data/processed")
+    processed_path = CorpusPaths.from_env().processed_dir  # same place corpus.pipeline writes
     processed_path.mkdir(parents=True, exist_ok=True)
 
     resolved_repo = remote_repo_id or config.sharding.remote_repo_id
@@ -304,6 +306,13 @@ def main():
         help="Override compute device ('cuda', 'cpu', 'auto')",
     )
     parser.add_argument(
+        "--data-root",
+        type=str,
+        default=None,
+        help="Directory the relative sharding.output_dir hangs off (default: $PTM_SAE_DATA_ROOT, "
+        "else the platform's writable area, else the repo root).",
+    )
+    parser.add_argument(
         "--kaggle-username",
         type=str,
         default=None,
@@ -314,6 +323,9 @@ def main():
     cfg = PipelineConfig.from_yaml(args.config)
     if args.device:
         cfg.model.device = args.device
+    cfg.sharding.output_dir = runtime.anchor_path(
+        cfg.sharding.output_dir, args.data_root or runtime.resolve_data_root()
+    )
 
     run_full_lifecycle(
         config=cfg,

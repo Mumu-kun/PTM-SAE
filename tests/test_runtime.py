@@ -1,6 +1,11 @@
 """Unit tests for platform detection, repo-root discovery, data-root resolution and secrets."""
 
+import subprocess
+import sys
+import types
 from pathlib import Path
+
+import pytest
 
 from ptm_sae import runtime
 
@@ -104,3 +109,43 @@ kaggle = ["kaggle>=1.6"]
     assert "torch>=2.2.0" not in runtime.cloud_requirements(root)
     assert "pydantic>=2.6.0" in runtime.cloud_requirements(root)
     assert runtime.missing_requirements(root) == ["not-a-real-pkg-xyz"]
+
+
+def test_resolve_secret_reads_only_the_detected_platforms_store(monkeypatch):
+    class FakeSecretsClient:
+        def get_secret(self, name):
+            return " from_kaggle " if name == "PTM_TEST_SECRET" else None
+
+    fake_module = types.ModuleType("kaggle_secrets")
+    fake_module.UserSecretsClient = FakeSecretsClient
+    monkeypatch.setitem(sys.modules, "kaggle_secrets", fake_module)
+    monkeypatch.delenv("PTM_TEST_SECRET", raising=False)
+
+    # The Kaggle store is consulted on Kaggle (value stripped) ...
+    monkeypatch.setattr(runtime, "detect_platform", lambda: "kaggle")
+    assert runtime.resolve_secret("PTM_TEST_SECRET") == "from_kaggle"
+    assert runtime.resolve_secret("OTHER_SECRET") is None
+
+    # ... and never elsewhere, even if the module happens to be importable.
+    monkeypatch.setattr(runtime, "detect_platform", lambda: "local")
+    assert runtime.resolve_secret("PTM_TEST_SECRET") is None
+
+
+def test_importing_the_runtime_module_loads_no_heavy_package():
+    """Notebooks import ptm_sae.runtime before installing numpy/torch; that import must not load them."""
+    code = (
+        "import sys, ptm_sae.runtime\n"
+        "heavy = [m for m in ('numpy', 'pandas', 'torch', 'scipy', 'pyarrow') if m in sys.modules]\n"
+        "assert not heavy, heavy\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)  # noqa: S603
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_package_entry_points_still_resolve_lazily():
+    import ptm_sae
+
+    assert callable(ptm_sae.run_sae_training) and callable(ptm_sae.run_full_lifecycle)
+    with pytest.raises(AttributeError):
+        ptm_sae.not_a_real_name  # noqa: B018
