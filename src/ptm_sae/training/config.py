@@ -15,6 +15,8 @@ class WandbConfig(BaseModel):
     enabled: bool = False
     project: str = "ptm-sae"
     run_name: str | None = None
+    # Runs sharing a group are compared side by side in W&B (the sweep launcher sets it).
+    group: str | None = None
     # Lets runs be filtered later (wandb.Api().runs(project, filters={"tags": ...})) and is
     # what scripts/cleanup_wandb_runs.py checks for a "shortlist" tag before deleting a run.
     tags: list[str] = Field(default_factory=list)

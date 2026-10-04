@@ -397,6 +397,7 @@ def run_sae_training(
         wandb_run = wandb.init(
             project=config.wandb.project,
             name=config.wandb.run_name,
+            group=config.wandb.group,
             config=config.model_dump(),
             tags=config.wandb.tags,
             id=resumed_run_id,
