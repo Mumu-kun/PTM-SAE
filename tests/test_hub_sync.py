@@ -3,6 +3,7 @@
 import io
 import json
 import logging
+import shutil
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -150,13 +151,21 @@ def test_hf_sync_client_path_normalization():
 
 def test_hf_sync_hydrate_atomic_write_and_size_guard(tmp_path):
     client = HfSyncClient(token="mock_token")
-    mock_source = tmp_path / "mock_downloaded.safetensors"
-    safetensors.torch.save_file({"acts": torch.zeros(10, 32)}, mock_source)
-    real_size = mock_source.stat().st_size
+    probe = tmp_path / "probe.safetensors"
+    safetensors.torch.save_file({"acts": torch.zeros(10, 32)}, probe)
+    real_size = probe.stat().st_size
+    downloads = []
+
+    def fake_download(**kwargs):
+        # hydrate_shard moves the downloaded blob out of the HF cache, so each call needs its own.
+        source = tmp_path / f"hf_cache_{len(downloads)}.safetensors"
+        shutil.copy2(probe, source)
+        downloads.append(source)
+        return str(source)
 
     target = tmp_path / "cache" / "shard_0000.safetensors"
 
-    with patch("ptm_sae.extraction.hub.hf_hub_download", return_value=str(mock_source)):
+    with patch("ptm_sae.extraction.hub.hf_hub_download", side_effect=fake_download):
         # Successful download and validation
         hydrated = client.hydrate_shard(
             repo_id="mock/repo",

@@ -4,7 +4,6 @@ import hashlib
 import logging
 import os
 import shutil
-import sys
 import time
 import urllib.error
 from collections.abc import Callable
@@ -13,6 +12,8 @@ from typing import TypeVar
 
 from huggingface_hub import HfApi, get_token, hf_hub_download
 from huggingface_hub.errors import HfHubHTTPError
+
+from ptm_sae.runtime import resolve_secret
 
 T = TypeVar("T")
 
@@ -53,85 +54,17 @@ def compute_sha256(file_path: Path) -> str:
 
 
 def resolve_hf_token(token: str | None = None) -> str | None:
-    """Discovers Hugging Face authentication token across a 5-tier zero-knowledge cascade:
-
-    1. Explicit function argument.
-    2. Environment variable (HF_TOKEN).
-    3. Google Colab Secrets (userdata.get('HF_TOKEN')).
-    4. Kaggle Secrets (UserSecretsClient().get_secret('HF_TOKEN')).
-    5. Local OS-level cache token (~/.cache/huggingface/token).
-    """
-    # 1. Explicit token argument
-    if token:
-        return token.strip()
-
-    # 2. Environment variable
-    if env_tok := os.environ.get("HF_TOKEN"):
-        return env_tok.strip()
-
-    # 3. Google Colab Secrets
-    if "google.colab" in sys.modules or Path("/content").exists():
-        try:
-            from google.colab import userdata  # type: ignore[import-not-found]
-
-            if colab_tok := userdata.get("HF_TOKEN"):
-                return colab_tok.strip()
-        except Exception:  # noqa: BLE001, S110
-            pass
-
-    # 4. Kaggle Secrets
-    if "kaggle_secrets" in sys.modules or Path("/kaggle").exists():
-        try:
-            from kaggle_secrets import (
-                UserSecretsClient,  # type: ignore[import-not-found]
-            )
-
-            if kaggle_tok := UserSecretsClient().get_secret("HF_TOKEN"):
-                return kaggle_tok.strip()
-        except Exception:  # noqa: BLE001, S110
-            pass
-
-    # 5. Local OS-level cached token
-    return get_token()
+    """Discovers the Hugging Face token: the shared secret cascade (explicit argument,
+    HF_TOKEN env var, Colab Secrets, Kaggle Secrets — see `runtime.resolve_secret`), then the
+    local OS-level cache token (~/.cache/huggingface/token)."""
+    return resolve_secret("HF_TOKEN", token) or get_token()
 
 
 def resolve_wandb_api_key(token: str | None = None) -> str | None:
-    """Discovers a Weights & Biases API key across the same zero-knowledge cascade as
-    `resolve_hf_token`, minus the local-cache tier (wandb manages its own netrc-based login
-    independently, so returning None here just lets `wandb.init()` fall back to that):
-
-    1. Explicit function argument.
-    2. Environment variable (WANDB_API_KEY).
-    3. Google Colab Secrets (userdata.get('WANDB_API_KEY')).
-    4. Kaggle Secrets (UserSecretsClient().get_secret('WANDB_API_KEY')).
-    """
-    if token:
-        return token.strip()
-
-    if env_key := os.environ.get("WANDB_API_KEY"):
-        return env_key.strip()
-
-    if "google.colab" in sys.modules or Path("/content").exists():
-        try:
-            from google.colab import userdata  # type: ignore[import-not-found]
-
-            if colab_key := userdata.get("WANDB_API_KEY"):
-                return colab_key.strip()
-        except Exception:  # noqa: BLE001, S110
-            pass
-
-    if "kaggle_secrets" in sys.modules or Path("/kaggle").exists():
-        try:
-            from kaggle_secrets import (
-                UserSecretsClient,  # type: ignore[import-not-found]
-            )
-
-            if kaggle_key := UserSecretsClient().get_secret("WANDB_API_KEY"):
-                return kaggle_key.strip()
-        except Exception:  # noqa: BLE001, S110
-            pass
-
-    return None
+    """Discovers the Weights & Biases API key via the shared secret cascade, minus the
+    local-cache tier (wandb manages its own netrc-based login independently, so returning None
+    here just lets `wandb.init()` fall back to that)."""
+    return resolve_secret("WANDB_API_KEY", token)
 
 
 def retry_with_backoff(
@@ -217,6 +150,26 @@ class HfSyncClient:
         except Exception:  # noqa: BLE001
             return None
         return None
+
+    def get_remote_files_info(
+        self, repo_id: str, remote_paths: list[str]
+    ) -> dict[str, tuple[int, str | None]]:
+        """Remote `path -> (size_bytes, lfs_sha256 or None)` for every requested path that exists
+        on the dataset repo in one metadata call. Paths absent from the repo are omitted."""
+        if not remote_paths:
+            return {}
+        infos = retry_with_backoff(
+            lambda: self.api.get_paths_info(
+                repo_id=repo_id,
+                paths=remote_paths,
+                repo_type="dataset",
+                token=self.token,
+            )
+        )
+        return {
+            info.path: (info.size, info.lfs.sha256 if info.lfs else None)
+            for info in infos
+        }
 
     def is_remote_file_identical(
         self,
@@ -328,9 +281,11 @@ class HfSyncClient:
         target_path: Path,
         expected_bytes: int | None = None,
     ) -> Path:
-        """Download a single SafeTensors shard on-demand via atomic temporary file renaming.
+        """Download a single file (SafeTensors shard, manifest, corpus table) on demand via atomic
+        temporary file renaming.
 
-        Guarantees that partially downloaded or corrupted files are never retained.
+        Guarantees that partially downloaded or corrupted files are never retained. The file is
+        MOVED out of the Hugging Face cache into `target_path`, so it occupies disk once, not twice.
         """
         remote_path = self.build_repo_path(subpath, shard_name)
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -346,8 +301,10 @@ class HfSyncClient:
 
         cached_file = retry_with_backoff(_download, max_retries=3, base_delay=2.0)
 
-        # 1. Copy downloaded file to atomic temporary path
-        shutil.copy2(cached_file, tmp_dest)
+        # 1. Move the cached blob (not the snapshot symlink pointing at it) to the atomic temporary
+        # path, then drop the dangling snapshot link.
+        shutil.move(Path(cached_file).resolve(), tmp_dest)
+        Path(cached_file).unlink(missing_ok=True)
 
         # 2. Verify expected byte size if provided
         actual_bytes = tmp_dest.stat().st_size

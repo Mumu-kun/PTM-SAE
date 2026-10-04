@@ -17,11 +17,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ptm_sae.runtime import resolve_data_root
+
 
 @dataclass
 class CorpusPaths:
     """Corpus build directories. Each is overridable via its own env var; otherwise all three
-    default under `PTM_SAE_CORPUS_ROOT` (default: the current directory)."""
+    default under `PTM_SAE_CORPUS_ROOT` (default: the shared data root, `runtime.resolve_data_root()`)."""
 
     raw_dir: Path
     interim_dir: Path
@@ -36,7 +38,7 @@ class CorpusPaths:
 
     @classmethod
     def from_env(cls) -> CorpusPaths:
-        root = Path(os.environ.get("PTM_SAE_CORPUS_ROOT", "."))
+        root = Path(os.environ.get("PTM_SAE_CORPUS_ROOT") or resolve_data_root())
         raw_dir = Path(
             os.environ.get("PTM_SAE_CORPUS_RAW_DIR", str(root / "data" / "raw"))
         )
