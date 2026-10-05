@@ -10,7 +10,7 @@ import safetensors.torch
 import torch
 
 from ptm_sae.training.config import SAETrainingConfig
-from ptm_sae.training.train import run_sae_training
+from ptm_sae.training.train import _append_metrics, run_sae_training
 
 HIDDEN_DIM = 8
 
@@ -654,3 +654,48 @@ def test_gated_training_loop_runs_and_checkpoints(tmp_path):
 
     assert result["final_step"] == 6
     assert (checkpoint_dir / "latest" / "config.json").exists()
+
+
+def test_training_writes_local_metrics_and_reports_peaks(tmp_path):
+    """Metrics land in checkpoint_dir/metrics.jsonl without wandb, and the run reports its peak memory."""
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    config = SAETrainingConfig(
+        sae_type="topk",
+        d_in=HIDDEN_DIM,
+        d_hidden=16,
+        k=4,
+        total_steps=6,
+        batch_size=8,
+        eval_interval_steps=3,
+        checkpoint_dir=str(checkpoint_dir),
+        cache_dir=str(cache_dir),
+        partition_folders=False,
+        remote_repo_id=None,
+        remote_corpus_repo_id=None,
+        remote_subpath=None,
+        corpus_dir=str(corpus_dir),
+        dead_latent_window_tokens=1000,
+        gpu_memory_fraction=0.5,  # a no-op without CUDA, and must not break a CPU run
+    )
+
+    result = run_sae_training(config)
+
+    rows = [json.loads(line) for line in (checkpoint_dir / "metrics.jsonl").read_text().splitlines()]
+    assert any("train/loss" in row for row in rows)
+    assert any("val/mse" in row for row in rows)
+    assert all(isinstance(row["step"], int) for row in rows)
+    assert {"vram_reserved_peak_gb", "vram_allocated_peak_gb", "host_ram_peak_gb"} <= result.keys()
+
+
+def test_append_metrics_keeps_numbers_and_skips_objects(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+
+    _append_metrics(path, {"a": 1.5, "histogram": [1, 2], "table": object()}, 3)
+    _append_metrics(path, {"a": 2}, 4)
+
+    assert [json.loads(line) for line in path.read_text().splitlines()] == [
+        {"step": 3, "a": 1.5},
+        {"step": 4, "a": 2},
+    ]

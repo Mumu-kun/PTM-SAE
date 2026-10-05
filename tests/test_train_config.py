@@ -56,3 +56,14 @@ def test_with_overrides_rederives_collapse_cadence_from_eval_interval():
 def test_with_overrides_rejects_bad_input(bad_override):
     with pytest.raises(ValueError):
         _config().with_overrides([bad_override])
+
+
+def test_gpu_memory_fraction_defaults_to_no_cap_and_is_overridable():
+    assert _config().gpu_memory_fraction is None
+    assert _config().with_overrides(["gpu_memory_fraction=0.5"]).gpu_memory_fraction == 0.5
+
+
+@pytest.mark.parametrize("bad", [0, -0.1, 1.5])
+def test_gpu_memory_fraction_must_be_in_the_unit_interval(bad):
+    with pytest.raises(ValueError, match="gpu_memory_fraction"):
+        _config(gpu_memory_fraction=bad)

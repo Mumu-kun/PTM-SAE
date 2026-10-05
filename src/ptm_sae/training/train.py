@@ -10,11 +10,17 @@ matching a run's own `checkpoint_dir`).
 """
 
 import argparse
+import json
 import os
 import time
 from pathlib import Path
 
 import torch
+
+try:
+    import resource  # POSIX only: peak host RAM of this process
+except ImportError:  # Windows
+    resource = None
 from transformers import get_cosine_schedule_with_warmup
 
 from ptm_sae import runtime
@@ -321,6 +327,25 @@ def _evaluate(
     return stats.finalize()
 
 
+def _append_metrics(path: Path, metrics: dict, step: int) -> None:
+    """One jsonl row per log event, next to the checkpoints: readable while the run is going (tail it, `pull`
+    it) with no upload lag, and independent of wandb. Non-numeric entries (histograms, tables) are skipped."""
+    row = {"step": step} | {k: v for k, v in metrics.items() if isinstance(v, int | float)}
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
+
+
+def _peak_memory_gb(device: torch.device) -> dict[str, float]:
+    """Peak GPU memory of this process (reserved = what the other users of a shared card feel; allocated =
+    what to budget) and peak host RAM. Zeros where there is nothing to measure."""
+    on_gpu = device.type == "cuda"
+    return {
+        "vram_reserved_peak_gb": torch.cuda.max_memory_reserved(device) / 2**30 if on_gpu else 0.0,
+        "vram_allocated_peak_gb": torch.cuda.max_memory_allocated(device) / 2**30 if on_gpu else 0.0,
+        "host_ram_peak_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20 if resource else 0.0,  # KiB on Linux
+    }
+
+
 def run_sae_training(
     config: SAETrainingConfig,
     progress_manager: PipelineProgressManager | None = None,
@@ -328,9 +353,14 @@ def run_sae_training(
     pm = progress_manager or PipelineProgressManager()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     autocast_dtype = torch.bfloat16 if config.dtype == "bf16" else None
+    # Shared-GPU etiquette: past its fraction this process raises OOM itself instead of squeezing out
+    # the other users. Cooperative: it caps our allocator, it reserves nothing.
+    if device.type == "cuda" and config.gpu_memory_fraction is not None:
+        torch.cuda.set_per_process_memory_fraction(config.gpu_memory_fraction, device)
 
     checkpoint_dir = Path(config.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = checkpoint_dir / "metrics.jsonl"
 
     # Resuming reconstructs the model from a PREVIOUS run's checkpoint_dir/latest/ (weights +
     # optimizer/scheduler/step/dead-latent-census/wandb_run_id) rather than building fresh.
@@ -578,6 +608,7 @@ def run_sae_training(
                 step_time_s = (data_wait_s_total + compute_s_total) / steps_since_timing_log
                 tokens_per_sec = config.batch_size / step_time_s
                 eta_seconds = (config.total_steps - step) * step_time_s
+                peaks = _peak_memory_gb(device)
                 pm.render_card(
                     f"[SAE Training] {config.sae_type}",
                     [
@@ -588,24 +619,29 @@ def run_sae_training(
                         f"{tokens_per_sec:.0f} tok/s  ETA {_format_duration(eta_seconds)}",
                         *([f"{k}={v:.4f}" for k, v in arch_metrics.items()] if arch_metrics else []),
                         pm.get_vram_telemetry(),
+                        "peak: "
+                        + (f"VRAM reserved {peaks['vram_reserved_peak_gb']:.2f} GB / allocated {peaks['vram_allocated_peak_gb']:.2f} GB  " if device.type == "cuda" else "")
+                        + f"host RAM {peaks['host_ram_peak_gb']:.1f} GB",
                     ],
                 )
+                train_metrics = (
+                    {
+                        "train/loss": loss.item(),
+                        "train/mse": out.mse_loss.item(),
+                        "train/l0": out.l0.item(),
+                        "train/dead_latent_fraction": dead_frac,
+                        "train/decoder_pre_norm_mean": decoder_pre_norm_mean,
+                        "train/data_wait_ms": data_wait_ms,
+                        "train/compute_ms": compute_ms,
+                        "train/tokens_per_sec": tokens_per_sec,
+                        "train/eta_seconds": eta_seconds,
+                    }
+                    | {f"train/{k}": v for k, v in arch_metrics.items()}
+                    | {f"train/{k}": v for k, v in peaks.items()}
+                )
+                _append_metrics(metrics_path, train_metrics, step)
                 if wandb_run is not None:
-                    wandb_run.log(
-                        {
-                            "train/loss": loss.item(),
-                            "train/mse": out.mse_loss.item(),
-                            "train/l0": out.l0.item(),
-                            "train/dead_latent_fraction": dead_frac,
-                            "train/decoder_pre_norm_mean": decoder_pre_norm_mean,
-                            "train/data_wait_ms": data_wait_ms,
-                            "train/compute_ms": compute_ms,
-                            "train/tokens_per_sec": tokens_per_sec,
-                            "train/eta_seconds": eta_seconds,
-                        }
-                        | {f"train/{k}": v for k, v in arch_metrics.items()},
-                        step=step,
-                    )
+                    wandb_run.log(train_metrics, step=step)
                 data_wait_s_total = 0.0
                 compute_s_total = 0.0
                 steps_since_timing_log = 0
@@ -637,19 +673,23 @@ def run_sae_training(
                         f"alive_latent_jaccard={'n/a' if alive_jaccard is None else f'{alive_jaccard:.1%}'}",
                     ],
                 )
+                density_counts = eval_stats.pop("feature_density_histogram")
+                val_metrics = (
+                    {f"val/{k}": v for k, v in eval_stats.items()}
+                    | {"val/dead_latent_fraction": dead_frac}
+                    | ({"val/alive_latent_jaccard": alive_jaccard} if alive_jaccard is not None else {})
+                )
+                _append_metrics(metrics_path, val_metrics, step)
                 if wandb_run is not None:
                     # feature_density_histogram's bin counts came back as a plain list from
                     # _StreamingEvalStats (kept wandb-free); wrap it in wandb.Histogram here, at
                     # the one call site that already depends on wandb, so the W&B UI renders it
                     # as an evolving histogram panel instead of an opaque array-valued scalar.
                     # Bin edges are log10-spaced over (1e-12, 1] to match torch.histc's args above.
-                    density_counts = eval_stats.pop("feature_density_histogram")
                     density_edges = torch.linspace(-12.0, 0.0, steps=len(density_counts) + 1).tolist()
                     wandb_run.log(
-                        {f"val/{k}": v for k, v in eval_stats.items()}
-                        | {"val/feature_density_histogram": wandb.Histogram(np_histogram=(density_counts, density_edges))}
-                        | {"val/dead_latent_fraction": dead_frac}
-                        | ({"val/alive_latent_jaccard": alive_jaccard} if alive_jaccard is not None else {}),
+                        val_metrics
+                        | {"val/feature_density_histogram": wandb.Histogram(np_histogram=(density_counts, density_edges))},
                         step=step,
                     )
 
@@ -705,6 +745,17 @@ def run_sae_training(
                         f"    by_negative_tier/{stratum}: "
                         f"n_latents_shortcut_suspect={negtier_stats['n_latents_shortcut_suspect']:.0f}"
                     )
+                # The wandb side below logs a table and line plots; the local file gets the flat scalars.
+                _append_metrics(
+                    metrics_path,
+                    {
+                        f"collapse_check/{section}/{key}/{metric}": value
+                        for section, section_stats in collapse_stats.items()
+                        for key, key_stats in section_stats.items()
+                        for metric, value in key_stats.items()
+                    },
+                    step,
+                )
                 if wandb_run is not None:
                     collapse_check_steps.append(step)
                     # Tidy long-format table: sortable/filterable across every section/key/metric
@@ -744,11 +795,10 @@ def run_sae_training(
                     f"    residue_dominance: collapse_rate={dominance_stats['collapse_rate']:.1%}"
                     f" / n_latents={dominance_stats['n_latents']:.0f}"
                 )
+                dominance_metrics = {f"residue_dominance/{k}": v for k, v in dominance_stats.items()}
+                _append_metrics(metrics_path, dominance_metrics, step)
                 if wandb_run is not None:
-                    wandb_run.log(
-                        {f"residue_dominance/{k}": v for k, v in dominance_stats.items()},
-                        step=step,
-                    )
+                    wandb_run.log(dominance_metrics, step=step)
 
         epoch += 1
 
@@ -756,7 +806,11 @@ def run_sae_training(
         wandb_run.finish()
 
     pm.print(f"\n[SAE Training] Finished at step {step}. Checkpoints in {checkpoint_dir}")
-    return {"final_step": step, "best_val_mse": best_val_mse, "checkpoint_dir": str(checkpoint_dir)}
+    return {
+        "final_step": step,
+        "best_val_mse": best_val_mse,
+        "checkpoint_dir": str(checkpoint_dir),
+    } | _peak_memory_gb(device)
 
 
 def main():
