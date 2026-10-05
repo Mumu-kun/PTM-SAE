@@ -32,19 +32,6 @@ def test_inject_mode_sets_the_default_and_leaves_the_rest_alone(kaggle_run):
     assert any('os.environ.get("PTM_SAE_MODE", "real")' in s for s in original)
 
 
-def test_inject_mode_sets_the_phases_default_when_given(kaggle_run):
-    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
-
-    both = kaggle_run.inject_mode(notebook, "real", "both")
-
-    sources = ["".join(c["source"]) for c in both["cells"]]
-    assert sum('os.environ.get("PTM_SAE_PHASES", "both")' in s for s in sources) == 1
-    untouched = kaggle_run.inject_mode(notebook, "real")
-    assert any('os.environ.get("PTM_SAE_PHASES", "corpus")' in "".join(c["source"]) for c in untouched["cells"])
-    with pytest.raises(ValueError, match="phases"):
-        kaggle_run.inject_mode(notebook, "real", "everything")
-
-
 def test_inject_mode_rejects_bad_input(kaggle_run):
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     with pytest.raises(ValueError, match="smoke"):
@@ -60,3 +47,27 @@ def test_metadata_is_private_internet_on_cpu_by_default(kaggle_run):
     assert metadata["title"] == "ptm sae corpus build"  # slugifies back to the id's slug
     assert (metadata["is_private"], metadata["enable_internet"], metadata["enable_gpu"]) == ("true", "true", "false")
     assert kaggle_run.build_metadata("someone", "x-y", "n.ipynb", gpu=True)["enable_gpu"] == "true"
+
+
+TRAIN_NOTEBOOK = NOTEBOOK.parent / "train_sae.ipynb"
+
+
+def test_inject_mode_sets_other_notebook_parameters(kaggle_run):
+    notebook = json.loads(TRAIN_NOTEBOOK.read_text(encoding="utf-8"))
+
+    patched = kaggle_run.inject_mode(
+        notebook, "real", params={"PTM_SAE_SWEEP_SPEC": "sweeps/topk_sweep.yaml", "PTM_SAE_QUICK": "1"}
+    )
+
+    source = "".join("".join(c["source"]) for c in patched["cells"])
+    assert 'os.environ.get("PTM_SAE_SWEEP_SPEC", "sweeps/topk_sweep.yaml")' in source
+    assert 'os.environ.get("PTM_SAE_QUICK", "1")' in source
+    original = "".join("".join(c["source"]) for c in notebook["cells"])
+    assert 'os.environ.get("PTM_SAE_SWEEP_SPEC", "")' in original  # the input is not mutated
+
+
+def test_inject_mode_rejects_a_parameter_the_notebook_does_not_have(kaggle_run):
+    notebook = json.loads(TRAIN_NOTEBOOK.read_text(encoding="utf-8"))
+
+    with pytest.raises(ValueError, match="PTM_SAE_NOPE"):
+        kaggle_run.inject_mode(notebook, "real", params={"PTM_SAE_NOPE": "1"})

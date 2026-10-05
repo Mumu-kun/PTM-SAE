@@ -8,9 +8,8 @@ mode on the platform they target and check the run summary:
     uv run --extra verify python scripts/verify_notebooks.py run --target local  --if-changed
     uv run --extra verify python scripts/verify_notebooks.py run --target kaggle --if-changed
 
-Targets: `local` runs the notebooks headlessly with nbconvert (corpus notebook only where `cd-hit`
-exists); `kaggle` syncs the working tree to a live Kaggle kernel through `kgz` (unofficial; reviewed
-version pinned in the `verify` extra), restarts it and executes the cells in order, stopping at the
+Targets: `local` runs the notebooks headlessly with nbconvert; `kaggle` syncs the working tree to a live
+Kaggle kernel through `kgz` (unofficial; reviewed version pinned in the `verify` extra), restarts it and executes the cells in order, stopping at the
 first uncaught error exactly as a Kaggle "Save & Run All" would. The kernel URL is a credential: it is
 read from a file (default ~/.kaggle_kernel_url, override with --url-file) and never printed.
 
@@ -37,11 +36,11 @@ STATE_FILE = REPO / ".verify_state.json"
 LOG_DIR = REPO / ".verify_logs"  # logs of failed runs are kept here (untracked)
 WATCHED = ("notebooks", "src/ptm_sae", "configs", "pyproject.toml")  # what a notebook run depends on
 SKIP_PARTS = {"__pycache__", ".ipynb_checkpoints", ".pytest_cache"}
-NOTEBOOKS = {"train": "notebooks/train_sae.ipynb", "corpus": "notebooks/kaggle_pipeline.ipynb"}
+NOTEBOOKS = {"train": "notebooks/train_sae.ipynb", "extract": "notebooks/kaggle_pipeline.ipynb"}
 # Cells that must have completed (not merely skipped) in a smoke run.
 REQUIRED_OK = {
     "train": ["install", "preflight", "config", "train", "readback"],
-    "corpus": ["install", "preflight", "corpus", "verify"],
+    "extract": ["install", "preflight", "extraction", "readback"],
 }
 KAGGLE_ZIP_INCLUDE = ("src/ptm_sae", "configs", "tests", "pyproject.toml", "README.md", "data/sample.fasta")
 NL = chr(10)
@@ -83,8 +82,6 @@ def evaluate(key: str, cells: dict) -> list[str]:
 
 def run_local(key: str) -> tuple[dict, list[str]]:
     """Headless nbconvert run in smoke mode against a throwaway data root."""
-    if key == "corpus" and shutil.which("cd-hit-2d") is None:
-        return {}, ["skipped: cd-hit not installed on this machine (verify the corpus notebook on Kaggle or the GPU box)"]
     with tempfile.TemporaryDirectory() as scratch:
         scratch = Path(scratch)
         env = {"PTM_SAE_MODE": "smoke", "PTM_SAE_PULL": "0", "PTM_SAE_DATA_ROOT": str(scratch / "dataroot"), "PYTHONUTF8": "1"}
@@ -104,8 +101,9 @@ def run_local(key: str) -> tuple[dict, list[str]]:
         if problems:  # keep the evidence: the scratch directory disappears when this block ends
             keep = LOG_DIR / f"local-{key}"
             shutil.rmtree(keep, ignore_errors=True)
-            shutil.copytree(scratch / "dataroot" / "logs", keep, ignore_errors=True) if (scratch / "dataroot" / "logs").exists() else None
-            for log in sorted(keep.glob("*.log")) if keep.exists() else []:
+            if (scratch / "dataroot" / "logs").exists():
+                shutil.copytree(scratch / "dataroot" / "logs", keep)
+            for log in sorted(keep.glob("*.log")):
                 print(f"--- tail of {log.name} (saved in {keep}) ---")
                 print(NL.join(log.read_text(errors="replace").replace(chr(13), NL).splitlines()[-12:]))
     return cells, problems

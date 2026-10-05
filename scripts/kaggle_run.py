@@ -15,33 +15,37 @@ preflight cell reports which are missing, by name only. Credentials come from ~/
 
 import argparse
 import json
+import re
 import tempfile
 from pathlib import Path
 
-MODE_DEFAULT = 'os.environ.get("PTM_SAE_MODE", "real")'
-PHASES_DEFAULT = 'os.environ.get("PTM_SAE_PHASES", "corpus")'
 
-
-def inject_mode(notebook: dict, mode: str, phases: str | None = None) -> dict:
-    """Copy of `notebook` whose PTM_SAE_MODE default is `mode` (smoke | real) and, when given, whose
-    PTM_SAE_PHASES default is `phases` (corpus | extraction | both)."""
-    if mode not in ("smoke", "real"):
-        raise ValueError(f"mode must be 'smoke' or 'real', not {mode!r}")
-    if phases not in (None, "corpus", "extraction", "both"):
-        raise ValueError(f"phases must be 'corpus', 'extraction' or 'both', not {phases!r}")
-    patched = json.loads(json.dumps(notebook))
-    replaced = 0
-    for cell in patched["cells"]:
-        source = "".join(cell["source"])
-        if MODE_DEFAULT in source:
-            replaced += 1
-            source = source.replace(MODE_DEFAULT, f'os.environ.get("PTM_SAE_MODE", "{mode}")')
-            if phases:
-                source = source.replace(PHASES_DEFAULT, f'os.environ.get("PTM_SAE_PHASES", "{phases}")')
+def _set_default(cells: list[dict], name: str, value: str) -> int:
+    """Rewrites the default of every `os.environ.get("NAME", "...")` in `cells`; returns how many it changed."""
+    pattern = re.compile(rf'os\.environ\.get\("{re.escape(name)}",\s*"[^"]*"\)')
+    replacement = f'os.environ.get("{name}", "{value}")'
+    changed = 0
+    for cell in cells:
+        source, count = pattern.subn(lambda _match: replacement, "".join(cell["source"]))
+        if count:
+            changed += count
             lines = source.split("\n")
             cell["source"] = [line + "\n" for line in lines[:-1]] + [lines[-1]]
-    if not replaced:
-        raise ValueError("notebook has no PTM_SAE_MODE parameter to set")
+    return changed
+
+
+def inject_mode(
+    notebook: dict, mode: str, params: dict[str, str] | None = None
+) -> dict:
+    """Copy of `notebook` whose PTM_SAE_MODE default is `mode` (smoke | real). `params` sets the default of
+    any other `os.environ.get("NAME", "...")` parameter, e.g. {"PTM_SAE_SWEEP_SPEC": "sweeps/topk_sweep.yaml"}."""
+    if mode not in ("smoke", "real"):
+        raise ValueError(f"mode must be 'smoke' or 'real', not {mode!r}")
+    patched = json.loads(json.dumps(notebook))
+    defaults = {"PTM_SAE_MODE": mode, **(params or {})}
+    for name, value in defaults.items():
+        if not _set_default(patched["cells"], name, value):
+            raise ValueError(f"notebook has no {name} parameter to set")
     return patched
 
 
@@ -79,7 +83,7 @@ def main() -> None:
     push.add_argument("notebook", type=Path)
     push.add_argument("--slug", required=True, help="kernel slug, e.g. ptm-sae-corpus-build")
     push.add_argument("--mode", choices=["smoke", "real"], default="real")
-    push.add_argument("--phases", choices=["corpus", "extraction", "both"], help="corpus notebook only; default corpus (CPU); extraction needs --gpu")
+    push.add_argument("--param", action="append", default=[], metavar="NAME=VALUE", help="set another notebook parameter default, e.g. PTM_SAE_QUICK=1 (repeatable)")
     push.add_argument("--gpu", action="store_true", help="GPU accelerator (default: CPU only, saves the weekly GPU quota)")
     for name in ("status", "output"):
         cmd = sub.add_parser(name)
@@ -91,14 +95,15 @@ def main() -> None:
     kernel = f"{username}/{args.slug}"
 
     if args.command == "push":
-        notebook = inject_mode(json.loads(args.notebook.read_text(encoding="utf-8")), args.mode, args.phases)
+        params = dict(item.split("=", 1) for item in args.param)
+        notebook = inject_mode(json.loads(args.notebook.read_text(encoding="utf-8")), args.mode, params)
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             (folder / args.notebook.name).write_text(json.dumps(notebook, indent=1), encoding="utf-8")
             metadata = build_metadata(username, args.slug, args.notebook.name, args.gpu)
             (folder / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             print(api.kernels_push(str(folder)))
-        print(f"pushed {kernel} (mode={args.mode}, phases={args.phases}, gpu={args.gpu}); status: python scripts/kaggle_run.py status --slug {args.slug}")
+        print(f"pushed {kernel} (mode={args.mode}, gpu={args.gpu}); status: python scripts/kaggle_run.py status --slug {args.slug}")
     elif args.command == "status":
         status = api.kernels_status(kernel)
         print(f"{kernel}: {status.status} {getattr(status, 'failure_message', None) or ''}")

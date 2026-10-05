@@ -94,3 +94,15 @@ def test_cloud_install_tolerates_a_newer_python_than_pyproject_names(name):
     install = next(src for src in _code_cells(name) if "cloud_requirements" in src)
 
     assert "--ignore-requires-python" in install
+
+
+def test_training_notebook_syncs_data_before_any_training_cell():
+    cells = _code_cells("notebooks/train_sae.ipynb")
+
+    def index_of(needle: str) -> int:
+        return next(i for i, src in enumerate(cells) if f'state.cell("{needle}")' in src)
+
+    assert index_of("data") < index_of("benchmark") < index_of("sweep")
+    assert index_of("data") < index_of("train")
+    # a sweep replaces the single run, never both
+    assert "if SWEEP_SPEC:" in cells[index_of("train")] and "if not SWEEP_SPEC:" in cells[index_of("sweep")]
