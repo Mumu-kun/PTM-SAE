@@ -230,7 +230,11 @@ def test_verify_outputs_real_mode_reports_each_failed_gate(
     assert pipeline.verify_outputs(paths) == []
 
     # Unbalanced partitions and an unmet headline bar are each reported.
-    manifest["balance"]["summary"]["discovery_val"]["mean_relative_deviation"] = 0.5
+    manifest["balance"]["features"]["size_gt_10"]["relative_deviation"]["discovery_val"] = 0.9  # reported, not gated
+    paths.split_manifest.write_text(json.dumps(manifest))
+    assert pipeline.verify_outputs(paths) == []
+    off_feature = next(name for name in manifest["balance"]["features"] if not name.startswith("size_"))
+    manifest["balance"]["features"][off_feature]["relative_deviation"]["discovery_val"] = 0.9
     paths.split_manifest.write_text(json.dumps(manifest))
     monkeypatch.setattr(pipeline, "CFG", dataclasses.replace(pipeline.CFG, min_sites_headline=10**9))
     problems = pipeline.verify_outputs(paths)

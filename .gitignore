@@ -45,3 +45,6 @@ notebooks/executed_*.ipynb
 # Notebook verification state (scripts/verify_notebooks.py)
 .verify_state.json
 .verify_logs/
+
+# Local run outputs (corpus builds, audits)
+runs/
