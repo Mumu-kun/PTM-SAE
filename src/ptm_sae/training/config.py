@@ -77,6 +77,10 @@ class SAETrainingConfig(BaseModel):
     # Tier 3 (the Residue Collapse canary) additionally joins discovery_val activations against
     # ptm_sites.jsonl and is opt-in since it's a real (if coarse) new computation, not free.
     density_histogram_bins: int = 20
+    # > 0: at every eval also score a fixed sample of about this many discovery_train tokens (logged as `train_sample/*`).
+    # Validation proteins are shorter and more concentrated than training ones, so val EV cannot be compared with
+    # train EV; the same code on a train sample separates overfitting from that distribution difference.
+    train_eval_tokens: int = 0
     enable_collapse_check: bool = False
     # None means "5x the main eval cadence" — the PTM-label join is heavier than a plain
     # reconstruction pass, so it runs less often by default.

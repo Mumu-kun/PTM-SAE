@@ -1,0 +1,33 @@
+# Stage 0.75 of the TopK sweep (rationale: docs/research/topk-sweep-design.md, docs/research/project-goals.md): the k-probe
+# again, with the collapse canaries ON, to take the first reading of the thesis variable (collapse versus sparsity) before the
+# long stage-1 grid. Same width, learning rate and 3,000 steps as the k probe; k = 32 is added (the stage-0 anchor) and k = 1,024
+# dropped (near dense). Two extra seeds at k = 128 give the noise floor: a difference counts as real only if it exceeds twice the
+# range across those three seeds (seed 0 is the k = 128 run itself).
+#
+# Hypotheses, fixed before any result (alive collapse rate = residue_dominance/collapse_rate_alive on discovery_val):
+#   H-A1  collapse falls as k rises (low k merges residue identity with context)   refuted if flat or rising
+#   H-A2  collapse stays above the 25% target at every k (not a sparsity artefact) refuted if some k is below 25%
+#   H-A3  seed range at k = 128 is smaller than the change across k                 else k cannot be ranked
+#   H-A4  the dominance rate is clearly above its own chance_rate and not pinned at 0 or 100%   else the canary is uninformative
+# Collapse is judged on the final model (step 3,000), with the 1,000 and 2,000 checks showing whether it has settled.
+# train_sample/* scores 100k fixed discovery_train tokens beside val/*: validation is more concentrated than training, so val EV
+# and train EV differ for any model; the pair separates overfitting from that difference.
+#
+# Run on Kaggle through notebooks/train_sae.ipynb:
+#   uv run --extra kaggle python scripts/kaggle_run.py push notebooks/train_sae.ipynb --slug ptm-sae-topk-sweep --gpu \
+#       --param PTM_SAE_SWEEP_SPEC=sweeps/topk_canary_read.yaml --param PTM_SAE_BENCHMARK=0
+# or anywhere with:  uv run python -m ptm_sae.training.sweep --spec sweeps/topk_canary_read.yaml
+
+base_config: configs/train_topk_baseline.yaml
+group: topk_canary_read
+tags: [ablation-phase2, canary-read]
+max_parallel: 4  # the concurrency benchmark chose 4 on Kaggle (2x T4)
+
+runs:
+  - {name: w4096_k128,    set: &canary {d_hidden: 4096, k: 128, learning_rate: 0.0004, total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: true, enable_residue_dominance_check: true, collapse_check_interval_steps: 1000, train_eval_tokens: 100000}}
+  - {name: w4096_k128_s1, set: {<<: *canary, seed: 1}}
+  - {name: w4096_k128_s2, set: {<<: *canary, seed: 2}}
+  - {name: w4096_k32,     set: {<<: *canary, k: 32}}
+  - {name: w4096_k64,     set: {<<: *canary, k: 64}}
+  - {name: w4096_k256,    set: {<<: *canary, k: 256}}
+  - {name: w4096_k512,    set: {<<: *canary, k: 512}}

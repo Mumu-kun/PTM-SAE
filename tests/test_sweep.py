@@ -290,3 +290,16 @@ def test_k_probe_spec_varies_only_k_at_width_4096():
     assert {r.overrides["learning_rate"] for r in runs} == {0.0004}
     assert all(r.overrides["total_steps"] == 3000 and not r.overrides["enable_collapse_check"] for r in runs)
     assert spec["max_parallel"] == 4
+
+
+def test_canary_read_spec_is_the_k_probe_with_canaries_on_and_two_extra_seeds_at_k128():
+    """Stage 0.75 (sweeps/topk_canary_read.yaml): collapse versus k with the canaries on, and the seed noise floor at k = 128."""
+    spec = yaml.safe_load((SWEEPS / "topk_canary_read.yaml").read_text(encoding="utf-8"))
+
+    runs = {r.name: r.overrides for r in sweep.expand_runs(spec)}
+
+    assert sorted(o["k"] for o in runs.values()) == [32, 64, 128, 128, 128, 256, 512]
+    assert {o["seed"] for n, o in runs.items() if o["k"] == 128 and "seed" in o} == {1, 2}
+    assert {o["d_hidden"] for o in runs.values()} == {4096} and {o["learning_rate"] for o in runs.values()} == {0.0004}
+    assert all(o["enable_collapse_check"] and o["enable_residue_dominance_check"] for o in runs.values())
+    assert all(o["collapse_check_interval_steps"] == 1000 and o["total_steps"] == 3000 and o["train_eval_tokens"] == 100000 for o in runs.values())

@@ -798,3 +798,20 @@ def test_residue_dominance_reports_thresholds_in_order_and_a_chance_level():
     assert stats["collapse_rate_alive_t50"] >= stats["collapse_rate_alive"] >= stats["collapse_rate_alive_t90"]
     assert 0.0 <= stats["chance_rate"] <= 0.01  # 7 of 10 from ~20 residues by luck is rare
     assert stats["n_alive"] == 50.0
+
+
+def test_train_sample_eval_logs_train_split_metrics_beside_validation(tmp_path):
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    checkpoint_dir = tmp_path / "checkpoints"
+    config = SAETrainingConfig(
+        sae_type="topk", d_in=HIDDEN_DIM, d_hidden=16, k=4, total_steps=6, batch_size=8, eval_interval_steps=3,
+        train_eval_tokens=16, checkpoint_dir=str(checkpoint_dir), cache_dir=str(cache_dir), partition_folders=False,
+        remote_repo_id=None, remote_corpus_repo_id=None, remote_subpath=None, corpus_dir=str(corpus_dir),
+        dead_latent_window_tokens=1000,
+    )
+
+    run_sae_training(config)
+
+    rows = [json.loads(line) for line in (checkpoint_dir / "metrics.jsonl").read_text().splitlines()]
+    evals = [row for row in rows if "val/mse" in row]
+    assert evals and all({"train_sample/mse", "train_sample/explained_variance", "train_sample/cosine_sim_mean"} <= row.keys() for row in evals)

@@ -555,6 +555,29 @@ def run_sae_training(
             min_coverage=config.min_partition_coverage,
     )
 
+    # A fixed sample of discovery_train for `train_sample/*`: one shuffled pass (a fixed seed, so every run scores the
+    # same tokens) keeping every `stride`-th batch, so it spans the whole partition instead of its first shards.
+    train_sample_batches: list[torch.Tensor] | None = None
+    if config.train_eval_tokens > 0:
+        sample_dataset, sample_loader = build_partition_dataloader(
+            "discovery_train",
+            batch_size=config.batch_size,
+            cache_dir=config.cache_dir,
+            remote_repo_id=config.remote_repo_id,
+            remote_subpath=config.remote_subpath,
+            corpus_dir=config.corpus_dir,
+            remote_corpus_repo_id=config.remote_corpus_repo_id,
+            remote_corpus_subpath=config.remote_corpus_subpath,
+            max_cached_shards=config.max_cached_shards,
+            num_workers=0,
+            seed=0,
+            partition_folders=config.partition_folders,
+            min_coverage=config.min_partition_coverage,
+        )
+        wanted_batches = max(1, config.train_eval_tokens // config.batch_size)
+        stride = max(1, len(sample_dataset) // config.batch_size // wanted_batches)
+        train_sample_batches = [b for i, b in enumerate(sample_loader) if i % stride == 0][:wanted_batches]
+
     # Dead-latent census: token-windowed, owned by the training loop (not the model) so the
     # model itself stays a stateless, checkpoint-friendly transformers.PreTrainedModel.
     if resume_state is not None:
@@ -734,6 +757,10 @@ def run_sae_training(
                     | {"val/dead_latent_fraction": dead_frac}
                     | ({"val/alive_latent_jaccard": alive_jaccard} if alive_jaccard is not None else {})
                 )
+                if train_sample_batches is not None:
+                    sample_stats, _ = _evaluate(model, train_sample_batches, config, device)
+                    val_metrics |= {f"train_sample/{k}": sample_stats[k] for k in ("mse", "explained_variance", "cosine_sim_mean")}
+                    pm.print(f"  train_sample: explained_variance={sample_stats['explained_variance']:.1%}  (val {eval_stats['explained_variance']:.1%})")
                 _append_metrics(metrics_path, val_metrics, step)
                 if wandb_run is not None:
                     # feature_density_histogram's bin counts came back as a plain list from
