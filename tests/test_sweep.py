@@ -210,3 +210,43 @@ def test_launcher_overrides_round_trip_through_the_real_training_config(tmp_path
     assert config.checkpoint_dir == str(tmp_path / "sweeps" / "g" / "k16")  # backslashes survive
     assert (config.wandb.run_name, config.wandb.group) == ("g_k16", "g")
     assert config.wandb.tags == ["ablation", "sweep", "g"]
+
+
+def test_topk_sweep_spec_is_six_distinct_topk_runs():
+    spec = yaml.safe_load(Path("sweeps/topk_sweep.yaml").read_text(encoding="utf-8"))
+
+    runs = sweep.expand_runs(spec)
+
+    assert len(runs) == 6
+    assert {(r.overrides["k"], r.overrides["learning_rate"]) for r in runs} == {
+        (k, lr) for k in (16, 32, 64) for lr in (0.0004, 0.001)
+    }
+    assert spec["base_config"] == "configs/train_topk_baseline.yaml"
+
+
+def test_pick_parallel_takes_the_smallest_level_within_five_percent_of_the_best():
+    results = [
+        {"concurrent": 1, "aggregate_tok_s": 60_000},
+        {"concurrent": 2, "aggregate_tok_s": 110_000},
+        {"concurrent": 4, "aggregate_tok_s": 118_000},  # within 5% of the best ...
+        {"concurrent": 6, "aggregate_tok_s": 120_000},  # ... which is this one
+    ]
+
+    assert sweep.pick_parallel(results) == 4
+    assert sweep.pick_parallel([{"concurrent": 2, "aggregate_tok_s": 0}]) == 1  # nothing measured: stay serial
+    assert sweep.pick_parallel(results[:2]) == 2
+
+
+def test_benchmark_cli_writes_results_and_the_chosen_concurrency(fake_trainer, tmp_path, monkeypatch):
+    out = tmp_path / "bench.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["sweep", "--benchmark", "--config", "configs/x.yaml", "--levels", "1,2", "--steps", "10",
+         "--data-root", str(tmp_path), "--benchmark-out", str(out)],
+    )  # fmt: skip
+
+    sweep.main()
+
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert [r["concurrent"] for r in written["results"]] == [1, 2]
+    assert written["chosen"] == 2  # the fake trainer scales linearly with concurrency

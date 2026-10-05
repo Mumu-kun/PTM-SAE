@@ -1,0 +1,12 @@
+# TopK sweep on the 4096-wide baseline: sparsity (k) x learning rate, one seed. Add `seeds: [0, 1]` for
+# replicates. Run on Kaggle through notebooks/train_sae.ipynb (PTM_SAE_SWEEP_SPEC=sweeps/topk_sweep.yaml),
+# or anywhere with:  uv run python -m ptm_sae.training.sweep --spec sweeps/topk_sweep.yaml
+# Re-running resumes: finished runs are skipped, interrupted ones continue from their latest checkpoint.
+
+base_config: configs/train_topk_baseline.yaml
+group: topk_sweep
+tags: [ablation-phase2]
+
+grid:
+  k: [16, 32, 64]
+  learning_rate: [0.0004, 0.001]

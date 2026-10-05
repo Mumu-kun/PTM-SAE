@@ -232,6 +232,16 @@ def benchmark_concurrency(
     return results
 
 
+def pick_parallel(results: list[dict]) -> int:
+    """Smallest concurrency whose aggregate tokens/sec is within 5% of the best measured: past that
+    point extra runs only compete for CPU and memory."""
+    measured = [r for r in results if r["aggregate_tok_s"]]
+    if not measured:
+        return 1
+    best = max(r["aggregate_tok_s"] for r in measured)
+    return min(r["concurrent"] for r in measured if r["aggregate_tok_s"] >= 0.95 * best)
+
+
 def _parse_set(items: list[str]) -> dict:
     return {key: yaml.safe_load(value) for key, _, value in (item.partition("=") for item in items)}
 
@@ -249,6 +259,7 @@ def main() -> None:
     parser.add_argument("--config", type=str, help="With --benchmark: base training config")
     parser.add_argument("--levels", type=str, default="1,2,4", help="With --benchmark: concurrency levels")
     parser.add_argument("--steps", type=int, default=300, help="With --benchmark: steps per run")
+    parser.add_argument("--benchmark-out", type=Path, help="With --benchmark: write the results (and the chosen concurrency) as JSON")
     parser.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE", help="With --benchmark: config override applied to every run")
     args = parser.parse_args()
 
@@ -256,10 +267,14 @@ def main() -> None:
     if args.benchmark:
         if not args.config:
             parser.error("--benchmark needs --config")
-        benchmark_concurrency(
+        results = benchmark_concurrency(
             args.config, [int(x) for x in args.levels.split(",")], args.steps,
             _parse_set(args.overrides), args.data_root, devices,
         )  # fmt: skip
+        chosen = pick_parallel(results)
+        print(f"[benchmark] chosen concurrency: {chosen}")
+        if args.benchmark_out:
+            args.benchmark_out.write_text(json.dumps({"results": results, "chosen": chosen}, indent=2), encoding="utf-8")
         return
     if not args.spec:
         parser.error("give --spec (or --benchmark)")
