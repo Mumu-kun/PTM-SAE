@@ -141,6 +141,7 @@ class ActivationPartitionDataset(IterableDataset):
         seed: int = 0,
         dtype: torch.dtype | None = torch.float32,
         partition_folders: bool = True,
+        min_coverage: float = 0.0,
     ):
         self.partition = partition
         self.cache_dir, self.remote_subpath = partition_root(
@@ -192,6 +193,13 @@ class ActivationPartitionDataset(IterableDataset):
                     f"({current[:12]}...). Re-extract against the current corpus."
                 )
         covered = sum(len(ids) for ids in shard_entries.values())
+        if covered < min_coverage * len(partition_ids):
+            raise ValueError(
+                f"Only {covered}/{len(partition_ids)} {partition} proteins ({covered / len(partition_ids):.1%}) have "
+                f"activations in {self.cache_dir}, below min_partition_coverage={min_coverage:.0%}: a run on a "
+                "fraction of the partition looks fine otherwise. Extract the rest, or lower the threshold on purpose "
+                "(the 8M pilot configs do)."
+            )
         if covered < len(partition_ids):
             warnings.warn(
                 f"Only {covered}/{len(partition_ids)} {partition} proteins "
@@ -288,6 +296,7 @@ def build_partition_dataloader(
     seed: int = 0,
     dtype: torch.dtype | None = torch.float32,
     partition_folders: bool = True,
+    min_coverage: float = 0.0,
 ) -> tuple[ActivationPartitionDataset, DataLoader]:
     """Convenience builder wiring an ActivationPartitionDataset into a torch DataLoader.
 
@@ -309,6 +318,7 @@ def build_partition_dataloader(
         seed=seed,
         dtype=dtype,
         partition_folders=partition_folders,
+        min_coverage=min_coverage,
     )
     loader = DataLoader(
         dataset,

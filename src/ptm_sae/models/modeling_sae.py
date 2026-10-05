@@ -178,7 +178,9 @@ class TopKSAEModel(SAEPreTrainedModel):
         self.post_init()
 
     def encode_pre_activation(self, activations: torch.Tensor) -> torch.Tensor:
-        return (activations - self.b_dec) @ self.W_enc + self.b_enc
+        """Operates in the internal, `activation_scale`-rescaled coordinate space (`b_dec` is seeded in that
+        same space by `initialize_bias_from_data`): a no-op when `activation_scale=1.0`."""
+        return (activations * self.config.activation_scale - self.b_dec) @ self.W_enc + self.b_enc
 
     def encode(self, activations: torch.Tensor) -> torch.Tensor:
         pre_acts = torch.relu(self.encode_pre_activation(activations))
@@ -188,8 +190,11 @@ class TopKSAEModel(SAEPreTrainedModel):
     def forward(
         self, activations: torch.Tensor, dead_latent_mask: torch.Tensor | None = None
     ) -> SAEOutput:
+        scale = self.config.activation_scale
         latents = self.encode(activations)
-        reconstruction = self.decode(latents)
+        # decode() lives in the scaled space; divide back out so the loss and every eval metric compare against
+        # activations in their original, raw units.
+        reconstruction = self.decode(latents) / scale
         mse_loss = self.reconstruction_loss(activations, reconstruction)
         l0 = latents.gt(0).sum(dim=-1).float().mean()
 
@@ -204,8 +209,11 @@ class TopKSAEModel(SAEPreTrainedModel):
                     "token-windowed dead-latent census) to be passed to forward() while training."
                 )
             pre_acts = self.encode_pre_activation(activations)
-            residual = activations - reconstruction
-            aux_loss = self.auxk_loss(pre_acts, residual, dead_latent_mask, self.k_aux)
+            # The residual and the aux reconstruction are compared in the scaled space (that is where W_dec
+            # lives); dividing by scale^2 puts the loss back in raw units, so alpha keeps its meaning next
+            # to the main MSE.
+            residual = (activations - reconstruction) * scale
+            aux_loss = self.auxk_loss(pre_acts, residual, dead_latent_mask, self.k_aux) / scale**2
 
         return SAEOutput(
             reconstruction=reconstruction,

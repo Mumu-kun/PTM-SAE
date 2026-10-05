@@ -26,9 +26,14 @@ class TopKSAEConfig(SAEConfig):
         k: int = 32,
         auxk_coefficient: float = 0.0,
         k_aux: int | None = None,
+        activation_scale: float = 1.0,
         **kwargs,
     ):
         self.k = k
+        # Rescales inputs internally so TopK, JumpReLU and Gated all live in the same E[||x||^2]=1 space
+        # whatever the raw activation magnitude (and a learning rate means the same across them). 1.0 is a
+        # no-op, which is also what checkpoints saved before this field existed load as.
+        self.activation_scale = activation_scale
         # AuxK (dead-latent auxiliary reconstruction loss) is off by default, matching the
         # "track and report only" baseline decision — set auxk_coefficient > 0 to enable it as
         # an ablation parameter. k_aux defaults to a power of two near d_in/2 if left unset

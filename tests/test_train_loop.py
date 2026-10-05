@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 import safetensors.torch
 import torch
 
@@ -404,6 +405,14 @@ def test_ptm_concentration_check_reports_three_sections(tmp_path):
     assert set(result["by_negative_tier"].keys()) == {"K", "ST"}
     assert result["by_negative_tier"]["ST"]["n_latents_shortcut_suspect"] >= 0
 
+    # The minimum-support metrics are a subset of the plain ones: the tiny fixture never reaches the support
+    # threshold, so nothing is supported and the supported statistics are zero, never more than the plain counts.
+    for stratum_stats in result["by_stratum"].values():
+        assert stratum_stats["n_supported_latents"] <= stratum_stats["n_active_latents"]
+        assert stratum_stats["n_supported_latents"] == 0 and stratum_stats["mean_concentration_ratio_supported"] == 0.0
+    for type_stats in result["by_ptm_type"].values():
+        assert type_stats["n_supported_latents"] == 0 and type_stats["best_latent_ratio_supported"] == 0.0
+
 
 def test_residue_dominance_check_runs_end_to_end(tmp_path, capsys):
     """Verify the opt-in, PTM-label-free Residue-Dominance Gate canary runs against
@@ -436,7 +445,7 @@ def test_residue_dominance_check_runs_end_to_end(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert result["final_step"] == 4
-    assert "residue_dominance: collapse_rate=" in out
+    assert "residue_dominance: collapse_rate_alive=" in out
 
 
 def test_residue_dominance_accumulator_reports_valid_collapse_rate(tmp_path):
@@ -699,3 +708,93 @@ def test_append_metrics_keeps_numbers_and_skips_objects(tmp_path):
         {"step": 3, "a": 1.5},
         {"step": 4, "a": 2},
     ]
+
+
+def test_decoder_pairwise_cosine_is_zero_for_orthogonal_and_one_for_identical_vectors():
+    from ptm_sae.training.train import _mean_pairwise_decoder_cosine
+
+    assert _mean_pairwise_decoder_cosine(torch.eye(6)) == pytest.approx(0.0, abs=1e-6)
+    assert _mean_pairwise_decoder_cosine(torch.ones(5, 4), chunk=2) == pytest.approx(1.0, abs=1e-6)
+    # chunking must not change the answer
+    w = torch.randn(9, 5, generator=torch.Generator().manual_seed(0))
+    assert _mean_pairwise_decoder_cosine(w, chunk=2) == pytest.approx(_mean_pairwise_decoder_cosine(w, chunk=100), abs=1e-6)
+
+
+def test_streaming_eval_stats_survive_a_huge_mean_and_report_never_fired_latents():
+    """Explained variance needs float64 accumulation: a dimension whose mean dwarfs its spread (an ESM-2
+    massive-activation dimension) breaks E[x^2] - mean^2 in float32. And the eval-time dead fraction counts
+    latents that never fire on the eval set."""
+    import numpy as np
+
+    from ptm_sae.training.train import _StreamingEvalStats
+
+    generator = torch.Generator().manual_seed(1)
+    x = torch.randn(4096, 4, generator=generator) + torch.tensor([3000.0, 0.0, 0.0, 0.0])
+    reconstruction = x + 0.05 * torch.randn(4096, 4, generator=generator)
+    latents = torch.zeros(4096, 6)
+    latents[:, :2] = 1.0  # four of six latents never fire
+
+    stats = _StreamingEvalStats(d_in=4, d_hidden=6, density_histogram_bins=4, device=torch.device("cpu"))
+    stats.update(x, reconstruction, torch.tensor(2.0), latents)
+    metrics, alive = stats.finalize()
+
+    x64, r64 = x.double().numpy(), reconstruction.double().numpy()
+    expected = 1.0 - ((x64 - r64) ** 2).sum() / (((x64 - x64.mean(axis=0)) ** 2).sum())
+    assert metrics["explained_variance"] == pytest.approx(expected, abs=1e-4)
+    assert metrics["never_fired_fraction"] == pytest.approx(4 / 6)
+    assert alive.tolist() == [True, True, False, False, False, False]
+    assert np.isfinite(metrics["mse"])
+
+
+def test_activation_stats_flag_a_dominant_dimension():
+    from ptm_sae.training.train import _activation_stats
+
+    x = torch.randn(2000, 10, generator=torch.Generator().manual_seed(2))
+    x[:, 3] *= 100  # one massive-activation dimension
+
+    stats = _activation_stats(x)
+
+    assert stats["activation/top5_dim_variance_share"] > 0.99
+    assert stats["activation/mean_sq_norm"] > 9000
+
+
+def test_residue_dominance_scores_only_latents_with_a_full_top_k_of_positive_activations():
+    """Dead and rarely firing latents must not count as "not collapsed": a TopK latent is exactly zero when off,
+    and zero-valued top-k slots carry arbitrary residues."""
+    from ptm_sae.training.residue_dominance import (
+        NUM_RESIDUE_CLASSES,
+        ResidueDominanceAccumulator,
+    )
+
+    top_k = 4
+    accumulator = ResidueDominanceAccumulator(d_hidden=3, top_k=top_k, device=torch.device("cpu"))
+    lysine, others = 8, torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+    codes = torch.cat([torch.full((8,), lysine), others, others])  # 24 positions
+    latents = torch.zeros(24, 3)
+    latents[:8, 0] = torch.arange(1, 9).float()  # latent 0: its strongest positions are all lysine -> dominant
+    latents[8:, 1] = torch.arange(1, 17).float()  # latent 1: its strongest positions are mixed residues
+    latents[0, 2] = 5.0  # latent 2: a single positive activation -> too little evidence to score
+    accumulator.update(latents, codes)
+
+    stats = accumulator.finalize(threshold=0.75)
+
+    assert stats["n_alive"] == 2.0 and stats["n_latents"] == 3.0
+    assert stats["collapse_rate_alive"] == pytest.approx(0.5)  # 1 of the 2 scored latents
+    assert stats["collapse_rate"] == pytest.approx(1 / 3)  # the all-latents denominator, kept for continuity
+    assert NUM_RESIDUE_CLASSES == 21
+
+
+def test_residue_dominance_reports_thresholds_in_order_and_a_chance_level():
+    from ptm_sae.training.residue_dominance import ResidueDominanceAccumulator
+
+    generator = torch.Generator().manual_seed(3)
+    accumulator = ResidueDominanceAccumulator(d_hidden=50, top_k=10, device=torch.device("cpu"))
+    codes = torch.randint(0, 20, (3000,), generator=generator)
+    latents = torch.rand(3000, 50, generator=generator)
+    accumulator.update(latents, codes)
+
+    stats = accumulator.finalize(threshold=0.7)
+
+    assert stats["collapse_rate_alive_t50"] >= stats["collapse_rate_alive"] >= stats["collapse_rate_alive_t90"]
+    assert 0.0 <= stats["chance_rate"] <= 0.01  # 7 of 10 from ~20 residues by luck is rare
+    assert stats["n_alive"] == 50.0

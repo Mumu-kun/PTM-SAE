@@ -108,6 +108,9 @@ class SAETrainingConfig(BaseModel):
     max_cached_shards: int | None = None
     num_workers: int = 0
     shuffle_buffer_size: int = 65536
+    # A training or validation partition whose activation manifest covers less than this share of its proteins fails
+    # at start instead of training silently on a fraction of it. The 8M pilot configs set 0 on purpose.
+    min_partition_coverage: float = 0.99
     # Fraction of the GPU's memory this process may reserve (0 < f <= 1). A cooperative cap for shared
     # GPUs: past it the run raises OOM itself instead of squeezing out the other users. None = no cap.
     gpu_memory_fraction: float | None = None
@@ -126,6 +129,8 @@ class SAETrainingConfig(BaseModel):
                 "l1_coefficient must be set explicitly for sae_type='gated' — "
                 "it is the gate's L1 penalty weight and has no safe default."
             )
+        if not 0 <= self.min_partition_coverage <= 1:
+            raise ValueError(f"min_partition_coverage must be in [0, 1], got {self.min_partition_coverage}")
         if self.gpu_memory_fraction is not None and not 0 < self.gpu_memory_fraction <= 1:
             raise ValueError(f"gpu_memory_fraction must be in (0, 1], got {self.gpu_memory_fraction}")
         if self.collapse_check_interval_steps is None:

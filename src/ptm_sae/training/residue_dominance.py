@@ -33,12 +33,10 @@ def load_discovery_val_sequences(
     corpus_path = hydrate_corpus_file(
         "corpus.parquet", corpus_dir, remote_corpus_repo_id, remote_corpus_subpath, token
     )
-    table = pq.read_table(corpus_path, columns=["uniprot_id", "sequence", "partition"])
-    return {
-        record["uniprot_id"]: record["sequence"]
-        for record in table.to_pylist()
-        if record.get("partition") == "discovery_val"
-    }
+    table = pq.read_table(
+        corpus_path, columns=["uniprot_id", "sequence"], filters=[("partition", "==", "discovery_val")]
+    )
+    return {record["uniprot_id"]: record["sequence"] for record in table.to_pylist()}
 
 
 class ResidueDominanceAccumulator:
@@ -51,10 +49,12 @@ class ResidueDominanceAccumulator:
         self.residue_codes = torch.full(
             (d_hidden, top_k), -1, dtype=torch.long, device=device
         )
+        self.residue_counts = torch.zeros(NUM_RESIDUE_CLASSES, dtype=torch.long, device=device)
 
     def update(self, latents: torch.Tensor, residue_codes: torch.Tensor) -> None:
         """`latents`: (L, d_hidden) raw activation values. `residue_codes`: (L,) long, amino-acid
         vocabulary index (0..NUM_RESIDUE_CLASSES-1)."""
+        self.residue_counts += torch.bincount(residue_codes, minlength=NUM_RESIDUE_CLASSES)
         combined_values = torch.cat(
             [self.values, latents.t()], dim=1
         )  # (d_hidden, top_k + L)
@@ -70,18 +70,40 @@ class ResidueDominanceAccumulator:
         self.residue_codes = torch.gather(combined_codes, 1, idx)
 
     def finalize(self, threshold: float) -> dict[str, float]:
-        valid = self.residue_codes >= 0
-        one_hot = torch.nn.functional.one_hot(
-            self.residue_codes.clamp_min(0), NUM_RESIDUE_CLASSES
-        )
-        one_hot = one_hot * valid.unsqueeze(-1)
-        counts = one_hot.sum(dim=1).float()  # (d_hidden, NUM_RESIDUE_CLASSES)
-        valid_counts = valid.sum(dim=1).clamp_min(1).float()  # (d_hidden,)
+        """Dominance statistics over the latents that can be scored at all.
 
-        dominance_frac = counts.max(dim=1).values / valid_counts
-        is_dominant = dominance_frac >= threshold
+        Only POSITIVE activations count: a TopK latent is exactly zero when off, and such slots carry arbitrary
+        residues (ties are broken arbitrarily). A latent is *alive* (scored) once it has a full top-k of positive
+        activations; the others are not counted as "not collapsed", they are left out, so dead latents cannot
+        make a run look better. `collapse_rate` keeps the all-latents denominator for continuity; the primary
+        number is `collapse_rate_alive`, with the rate at the neighbouring thresholds (the 0.7 / top-10 setting is
+        a heuristic) and `chance_rate`, what independent draws from the observed amino-acid frequencies would give."""
+        valid = (self.residue_codes >= 0) & (self.values > 0)
+        one_hot = torch.nn.functional.one_hot(self.residue_codes.clamp_min(0), NUM_RESIDUE_CLASSES)
+        counts = (one_hot * valid.unsqueeze(-1)).sum(dim=1).float()  # (d_hidden, NUM_RESIDUE_CLASSES)
+        n_valid = valid.sum(dim=1)
+        alive = n_valid >= self.top_k
+        dominance_frac = counts.max(dim=1).values / n_valid.clamp_min(1).float()
+        n_alive = alive.sum().clamp_min(1).float()
+
+        def dominant(at: float) -> torch.Tensor:
+            return (dominance_frac >= at - 1e-6) & alive  # the tolerance: 7/10 in float32 vs 0.7
+
+        chance = 0.0
+        if self.residue_counts.sum() > 0:  # nothing seen, nothing to compare against
+            frequencies = self.residue_counts.float().cpu()
+            generator = torch.Generator(device="cpu").manual_seed(0)
+            draws = torch.multinomial(frequencies, 20_000 * self.top_k, replacement=True, generator=generator)
+            chance_counts = torch.nn.functional.one_hot(draws.view(20_000, self.top_k), NUM_RESIDUE_CLASSES).sum(dim=1)
+            chance = ((chance_counts.max(dim=1).values / self.top_k) >= threshold - 1e-6).float().mean().item()
+
         return {
-            "collapse_rate": is_dominant.float().mean().item(),
+            "collapse_rate": dominant(threshold).float().mean().item(),
+            "collapse_rate_alive": (dominant(threshold).sum() / n_alive).item(),
+            "collapse_rate_alive_t50": (dominant(0.5).sum() / n_alive).item(),
+            "collapse_rate_alive_t90": (dominant(0.9).sum() / n_alive).item(),
+            "chance_rate": chance,
+            "n_alive": float(alive.sum().item()),
             "n_latents": float(self.values.shape[0]),
         }
 

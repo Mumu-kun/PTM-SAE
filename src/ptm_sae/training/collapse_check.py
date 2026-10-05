@@ -39,6 +39,12 @@ NEAR_BEST_RATIO_THRESHOLD = 0.8
 # A latent firing on `hard` negatives at >80% of its modified-residue firing rate can't
 # actually tell the two apart — a shortcut-learning flag.
 SHORTCUT_ACTIVITY_RATIO_THRESHOLD = 0.8
+# A concentration ratio is a ratio of two small counts for a rarely firing latent (one active token that happens to
+# be modified gives the maximum possible ratio), and rare latents multiply with width and with a low k. The
+# `*_supported` metrics only count latents with at least this many active tokens in the stratum (and, per PTM
+# type, this many of them on modified residues), so they can be compared across widths and values of k.
+MIN_ACTIVE_SUPPORT = 20
+MIN_ACTIVE_POSITIVE_SUPPORT = 3
 
 
 @dataclass(frozen=True)
@@ -82,34 +88,37 @@ def load_discovery_val_labels(
     exclusion_path = hydrate("exclusion_mask.parquet", required=False)
     gold_path = hydrate("gold_negatives_nglyco.parquet", required=False)
 
-    corpus_rows = pq.read_table(
-        corpus_path, columns=["uniprot_id", "sequence", "partition"]
-    ).to_pylist()
-    val_sequences = {
-        row["uniprot_id"]: row["sequence"]
-        for row in corpus_rows
-        if row.get("partition") == "discovery_val"
-    }
+    val_corpus = pq.read_table(
+        corpus_path,
+        columns=["uniprot_id", "sequence"],
+        filters=[("partition", "==", "discovery_val")],
+    )
+    val_sequences = {row["uniprot_id"]: row["sequence"] for row in val_corpus.to_pylist()}
 
     ptm_types_by_position: dict[str, dict[int, set[str]]] = defaultdict(
         lambda: defaultdict(set)
     )
     stratum_by_position: dict[str, dict[int, str]] = defaultdict(dict)
-    for row in pq.read_table(labels_path).to_pylist():
-        if row.get("partition") != "discovery_val":
-            continue
+    # Only the discovery_val rows and the five columns used are read: the whole table (every partition, every column)
+    # as Python objects is several GB for the real corpus, enough to exhaust a laptop.
+    val_sites = pq.read_table(
+        labels_path,
+        columns=["uniprot_id", "position", "ptm_type", "stratum"],
+        filters=[("partition", "==", "discovery_val")],
+    )
+    for row in val_sites.to_pylist():
         uniprot_id, position = row["uniprot_id"], row["position"]
         ptm_types_by_position[uniprot_id][position].add(row["ptm_type"])
         stratum_by_position[uniprot_id][position] = row["stratum"]
 
     excluded_positions: dict[str, set[int]] = defaultdict(set)
     if exclusion_path is not None:
-        for row in pq.read_table(exclusion_path).to_pylist():
+        for row in pq.read_table(exclusion_path, columns=["uniprot_id", "position"]).to_pylist():
             excluded_positions[row["uniprot_id"]].add(row["position"])
 
     gold_positions: dict[str, set[int]] = defaultdict(set)
     if gold_path is not None:
-        for row in pq.read_table(gold_path).to_pylist():
+        for row in pq.read_table(gold_path, columns=["uniprot_id", "position"]).to_pylist():
             gold_positions[row["uniprot_id"]].add(row["position"])
 
     labels: StratumLabels = {}
@@ -245,6 +254,9 @@ class PTMConcentrationAccumulator:
                     "mean_concentration_ratio": 0.0,
                     "n_latents_above_2x_baseline": 0.0,
                     "n_active_latents": float(has_activity.sum().item()),
+                    "n_supported_latents": 0.0,
+                    "mean_concentration_ratio_supported": 0.0,
+                    "frac_above_2x_baseline_supported": 0.0,
                 }
                 continue
 
@@ -253,12 +265,18 @@ class PTMConcentrationAccumulator:
                 / self.active_count[i, has_activity]
             )
             ratio = active_modified_rate / base_rate
+            supported = self.active_count[i, has_activity] >= MIN_ACTIVE_SUPPORT
+            n_supported = float(supported.sum().item())
+            n_above_supported = float(((ratio > BASELINE_RATIO_THRESHOLD) & supported).sum().item())
             results[stratum] = {
                 "mean_concentration_ratio": ratio.mean().item(),
                 "n_latents_above_2x_baseline": float(
                     (ratio > BASELINE_RATIO_THRESHOLD).sum().item()
                 ),
                 "n_active_latents": float(has_activity.sum().item()),
+                "n_supported_latents": n_supported,
+                "mean_concentration_ratio_supported": ratio[supported].mean().item() if n_supported else 0.0,
+                "frac_above_2x_baseline_supported": n_above_supported / n_supported if n_supported else 0.0,
             }
         return results
 
@@ -277,6 +295,8 @@ class PTMConcentrationAccumulator:
                     "n_latents_above_2x_baseline": 0.0,
                     "best_latent_ratio": 0.0,
                     "n_latents_near_best": 0.0,
+                    "n_supported_latents": 0.0,
+                    "best_latent_ratio_supported": 0.0,
                 }
                 continue
 
@@ -291,6 +311,10 @@ class PTMConcentrationAccumulator:
                 if best_ratio > 0
                 else 0.0
             )
+            supported = (self.active_count[stratum_idx, has_activity] >= MIN_ACTIVE_SUPPORT) & (
+                self.active_positive_count[p, has_activity] >= MIN_ACTIVE_POSITIVE_SUPPORT
+            )
+            n_supported = float(supported.sum().item())
             results[key] = {
                 "mean_concentration_ratio": ratio.mean().item(),
                 "n_latents_above_2x_baseline": float(
@@ -298,6 +322,8 @@ class PTMConcentrationAccumulator:
                 ),
                 "best_latent_ratio": best_ratio,
                 "n_latents_near_best": n_near_best,
+                "n_supported_latents": n_supported,
+                "best_latent_ratio_supported": ratio[supported].max().item() if n_supported else 0.0,
             }
         return results
 

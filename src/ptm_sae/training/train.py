@@ -244,9 +244,11 @@ class _StreamingEvalStats:
     reconstruction cosine similarity (a scale-invariant complement to MSE)."""
 
     def __init__(self, d_in: int, d_hidden: int, density_histogram_bins: int, device: torch.device):
-        self.sum_x = torch.zeros(d_in, device=device)
-        self.sum_x2 = torch.zeros(d_in, device=device)
-        self.sum_sq_err = torch.tensor(0.0, device=device)
+        # float64: the variance is E[x^2] - mean^2, which loses its digits in float32 when a dimension's mean
+        # dwarfs its spread (ESM-2 has a few massive-activation dimensions).
+        self.sum_x = torch.zeros(d_in, device=device, dtype=torch.float64)
+        self.sum_x2 = torch.zeros(d_in, device=device, dtype=torch.float64)
+        self.sum_sq_err = torch.tensor(0.0, device=device, dtype=torch.float64)
         self.sum_l0 = torch.tensor(0.0, device=device)
         self.n_rows = 0
         self.fire_count = torch.zeros(d_hidden, device=device)
@@ -256,9 +258,10 @@ class _StreamingEvalStats:
     def update(
         self, x: torch.Tensor, reconstruction: torch.Tensor, l0: torch.Tensor, latents: torch.Tensor
     ) -> None:
-        self.sum_x += x.sum(dim=0)
-        self.sum_x2 += (x**2).sum(dim=0)
-        self.sum_sq_err += (x - reconstruction).pow(2).sum()
+        x64, reconstruction64 = x.double(), reconstruction.double()
+        self.sum_x += x64.sum(dim=0)
+        self.sum_x2 += (x64**2).sum(dim=0)
+        self.sum_sq_err += (x64 - reconstruction64).pow(2).sum()
         self.sum_l0 += l0 * x.shape[0]
         self.n_rows += x.shape[0]
         self.fire_count += latents.gt(0).sum(dim=0).float()
@@ -299,11 +302,25 @@ class _StreamingEvalStats:
             "mse": mse,
             "explained_variance": explained_variance,
             "mean_l0": (self.sum_l0 / n).item(),
+            # Never fired on discovery_val: an eval-time statement, unlike the training census that is logged
+            # as `val/dead_latent_fraction` (a trailing token window over TRAINING batches).
+            "never_fired_fraction": 1.0 - alive_mask.float().mean().item(),
             "cosine_sim_mean": cosine.mean().item(),
             "cosine_sim_p10": torch.quantile(cosine, 0.10).item(),
             "feature_density_histogram": hist.tolist(),
         }
         return metrics, alive_mask
+
+
+@torch.no_grad()
+def _mean_pairwise_decoder_cosine(w_dec: torch.Tensor, chunk: int = 2048) -> float:
+    """Mean |cosine| over all pairs of distinct decoder vectors ("c_dec", Chanin et al. 2025, "Sparse but
+    Wrong"): near-orthogonal decoders mean the latents are not mixing correlated features, and the curve over
+    L0 has a valley at the right sparsity. Chunked, so a 10,240-wide dictionary never builds the full matrix."""
+    w = torch.nn.functional.normalize(w_dec.detach().float(), dim=-1)
+    n = w.shape[0]
+    total = sum((w[start : start + chunk] @ w.T).abs().sum().item() for start in range(0, n, chunk))
+    return (total - n) / max(1, n * (n - 1))  # each vector's cosine with itself is 1, n of them
 
 
 @torch.no_grad()
@@ -324,7 +341,29 @@ def _evaluate(
         out = model(batch)
         stats.update(batch, out.reconstruction, out.l0, out.latents)
     model.train()
-    return stats.finalize()
+    metrics, alive_mask = stats.finalize()
+    metrics["decoder_pairwise_cosine"] = _mean_pairwise_decoder_cosine(model.W_dec)
+    return metrics, alive_mask
+
+
+# Adam epsilon from Gao et al. 2024 (appendix A.3.1): the loss is a batch mean, so gradients are tiny, and with the
+# default 1e-8 Adam stops being invariant to the loss scale.
+ADAM_EPS = 6.25e-10
+
+
+@torch.no_grad()
+def _activation_stats(x: torch.Tensor) -> dict[str, float]:
+    """Scale of the raw activations, from the sample that seeds b_dec: what the learning rate and the
+    activation_scale are relative to, and whether a few massive-activation dimensions dominate the variance."""
+    variance = x.var(dim=0)
+    norms = x.norm(dim=-1)
+    return {
+        "activation/mean_sq_norm": x.pow(2).sum(dim=-1).mean().item(),
+        "activation/norm_p50": norms.quantile(0.5).item(),
+        "activation/norm_p99": norms.quantile(0.99).item(),
+        "activation/top5_dim_variance_share": (variance.topk(5).values.sum() / variance.sum()).item(),
+        "activation/max_abs_mean_over_std": (x.mean(dim=0).abs() / x.std(dim=0).clamp_min(1e-8)).max().item(),
+    }
 
 
 def _append_metrics(path: Path, metrics: dict, step: int) -> None:
@@ -368,6 +407,7 @@ def run_sae_training(
     # No RNG state needs restoring: ActivationPartitionDataset.set_epoch() reseeds shuffling
     # purely from (seed, epoch, worker_id), and none of the four architectures use dropout.
     resume_state: dict | None = None
+    activation_stats: dict[str, float] = {}  # filled on a fresh start (a resume restored the scale already)
     if config.resume_from is not None:
         resume_latest_dir = Path(config.resume_from) / "latest"
         model = MODEL_CLASS_BY_TYPE[config.sae_type].from_pretrained(resume_latest_dir).to(device)
@@ -393,6 +433,7 @@ def run_sae_training(
             shuffle=True,
             seed=config.seed,
             partition_folders=config.partition_folders,
+            min_coverage=config.min_partition_coverage,
         )
         bias_init_sample: list[torch.Tensor] = []
         bias_init_tokens = 0
@@ -408,14 +449,20 @@ def run_sae_training(
         # of this — compute and apply the one scalar that closes that gap, from the same real
         # sample used to seed b_dec below. (On resume, from_pretrained already restored this
         # from the checkpoint's saved config, so nothing to compute here.)
-        if config.sae_type in ("jumprelu", "gated"):
-            model.config.activation_scale = (
-                1.0 / bias_init_activations.pow(2).sum(dim=-1).mean().sqrt()
-            ).item()
+        model.config.activation_scale = (
+            1.0 / bias_init_activations.pow(2).sum(dim=-1).mean().sqrt()
+        ).item()
+        activation_stats = _activation_stats(bias_init_activations)
 
         model.initialize_bias_from_data(bias_init_activations)
 
     activation_scale = getattr(model.config, "activation_scale", None)
+    if activation_stats:
+        pm.print(
+            "  activations: "
+            + "  ".join(f"{k.split('/')[1]}={v:.4g}" for k, v in activation_stats.items())
+        )
+        _append_metrics(metrics_path, activation_stats, 0)
 
     wandb_run = None
     if config.wandb.enabled:
@@ -438,6 +485,8 @@ def run_sae_training(
         )
         if activation_scale is not None:
             wandb_run.config.update({"activation_scale": activation_scale})
+        if activation_stats:
+            wandb_run.config.update(activation_stats)
 
     collapse_labels = None
     if config.enable_collapse_check:
@@ -457,7 +506,9 @@ def run_sae_training(
 
     # Optimizer/scheduler are built AFTER the (possibly resumed) model so their param
     # references point at the loaded weights, then their state dicts are restored on top.
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.0)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=config.learning_rate, betas=(0.9, 0.999), eps=ADAM_EPS, weight_decay=0.0
+    )
 
     scheduler = None
     if config.sae_type == "jumprelu":
@@ -486,6 +537,7 @@ def run_sae_training(
         shuffle_buffer_size=config.shuffle_buffer_size,
         seed=config.seed,
         partition_folders=config.partition_folders,
+            min_coverage=config.min_partition_coverage,
     )
     _, val_loader = build_partition_dataloader(
         "discovery_val",
@@ -500,6 +552,7 @@ def run_sae_training(
         num_workers=0,
         shuffle=False,
         partition_folders=config.partition_folders,
+            min_coverage=config.min_partition_coverage,
     )
 
     # Dead-latent census: token-windowed, owned by the training loop (not the model) so the
@@ -670,6 +723,7 @@ def run_sae_training(
                     [
                         f"val_mse={eval_stats['mse']:.4f}  explained_variance={eval_stats['explained_variance']:.1%}",
                         f"mean_l0={eval_stats['mean_l0']:.1f}  dead_latent_fraction={dead_frac:.1%}",
+                        f"never_fired_on_val={eval_stats['never_fired_fraction']:.1%}  decoder_pairwise_cosine={eval_stats['decoder_pairwise_cosine']:.4f}",
                         f"cosine_sim: mean={eval_stats['cosine_sim_mean']:.3f}  p10={eval_stats['cosine_sim_p10']:.3f}",
                         f"alive_latent_jaccard={'n/a' if alive_jaccard is None else f'{alive_jaccard:.1%}'}",
                     ],
@@ -793,8 +847,9 @@ def run_sae_training(
                     config.residue_dominance_threshold,
                 )
                 pm.print(
-                    f"    residue_dominance: collapse_rate={dominance_stats['collapse_rate']:.1%}"
-                    f" / n_latents={dominance_stats['n_latents']:.0f}"
+                    f"    residue_dominance: collapse_rate_alive={dominance_stats['collapse_rate_alive']:.1%}"
+                    f" (chance {dominance_stats['chance_rate']:.2%}) / n_alive={dominance_stats['n_alive']:.0f}"
+                    f" of {dominance_stats['n_latents']:.0f}"
                 )
                 dominance_metrics = {f"residue_dominance/{k}": v for k, v in dominance_stats.items()}
                 _append_metrics(metrics_path, dominance_metrics, step)

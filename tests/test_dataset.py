@@ -258,6 +258,16 @@ def test_dataset_warns_on_partial_coverage_of_legacy_manifest(tmp_path):
         ActivationPartitionDataset("discovery_train", cache_dir, corpus_dir=corpus_dir, **MIXED)
 
 
+def test_dataset_refuses_a_partition_covered_below_the_minimum(tmp_path):
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    manifest_path = cache_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["entries"]["proteinC"]  # 1 of the 2 discovery_train proteins has no activations
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"1/2 discovery_train.*min_partition_coverage=75%"):
+        ActivationPartitionDataset("discovery_train", cache_dir, corpus_dir=corpus_dir, min_coverage=0.75, **MIXED)
+
 
 def test_partition_root_switches_between_the_per_partition_and_mixed_layouts():
     from pathlib import Path

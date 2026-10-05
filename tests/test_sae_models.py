@@ -441,3 +441,29 @@ def test_gated_sae_save_load_round_trip(tmp_path):
     assert torch.equal(reloaded.r_mag, sae.r_mag)
     assert torch.equal(reloaded.b_gate, sae.b_gate)
     assert torch.equal(reloaded.b_mag, sae.b_mag)
+
+
+def test_topk_activation_scale_is_the_same_model_in_a_rescaled_space():
+    """A TopK with activation_scale=s on raw inputs must equal a scale-1 TopK on inputs pre-multiplied by s,
+    with the reconstruction reported back in raw units, and AuxK keeping its meaning (loss in raw units)."""
+    torch.manual_seed(31)
+    d_in, d_hidden, k, scale = 8, 32, 4, 0.25
+    base = TopKSAEModel(TopKSAEConfig(d_in=d_in, d_hidden=d_hidden, k=k, auxk_coefficient=0.1))
+    scaled = TopKSAEModel(TopKSAEConfig(d_in=d_in, d_hidden=d_hidden, k=k, auxk_coefficient=0.1, activation_scale=scale))
+    scaled.load_state_dict(base.state_dict())
+    x = torch.randn(16, d_in) * 10
+    dead = torch.zeros(d_hidden, dtype=torch.bool)
+    dead[::2] = True
+
+    reference = base(x * scale, dead_latent_mask=dead)
+    out = scaled(x, dead_latent_mask=dead)
+
+    assert torch.allclose(out.latents, reference.latents, atol=1e-6)
+    assert torch.allclose(out.reconstruction, reference.reconstruction / scale, atol=1e-5)
+    assert torch.allclose(out.aux_loss, reference.aux_loss / scale**2, rtol=1e-4)
+
+
+def test_topk_config_without_activation_scale_loads_as_a_no_op():
+    """Checkpoints saved before the field existed must keep working: the default is 1.0."""
+    assert TopKSAEConfig(d_in=8, d_hidden=16, k=2).activation_scale == 1.0
+    assert BatchTopKSAEConfig(d_in=8, d_hidden=16, k=2, activation_scale=0.5).activation_scale == 0.5

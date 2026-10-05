@@ -24,6 +24,7 @@ enable_residue_dominance_check: true
 
 cache_dir: cache/activations/pilot_8m
 partition_folders: false  # the 8M pilot predates per-partition shards
+min_partition_coverage: 0.0  # the pilot covers a few hundred proteins on purpose
 remote_repo_id: mustafa-muhaimin/ptm-sae-corpus
 remote_subpath: activations/esm2_t6_8M_UR50D/layer_4
 remote_corpus_repo_id: mustafa-muhaimin/ptm-sae-corpus
