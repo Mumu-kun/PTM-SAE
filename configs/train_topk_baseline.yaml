@@ -8,8 +8,8 @@ d_hidden: 4096
 k: 32
 
 # Measured on real Kaggle GPU session: 62,093 tok/s at width=4096, k=64 (this run uses k=32,
-# should be similar or slightly faster). ~5.08M discovery_train tokens / batch_size below ≈
-# ~1,240 steps/epoch ≈ 82s/epoch. 24,000 steps ≈ 20 epochs ≈ ~26 min training time — a first
+# should be similar or slightly faster). ~5.21M discovery_train tokens / batch_size below ≈
+# ~1,273 steps/epoch ≈ 84s/epoch. 24,000 steps ≈ 19 epochs ≈ ~27 min training time — a first
 # look, not a final number; extend if val_mse/explained_variance are still improving at the end.
 total_steps: 24000
 learning_rate: 0.0004

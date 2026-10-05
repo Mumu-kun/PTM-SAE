@@ -26,8 +26,8 @@ sparsity_tanh_c: 4.0
 # inactive latents a gradient nudge toward firing.
 preact_coefficient: 0.000003
 
-# Measured on real Kaggle GPU session: 55,345 tok/s at width=4096. ~5.08M discovery_train
-# tokens / batch_size below ≈ ~1,240 steps/epoch ≈ 92s/epoch. 24,000 steps ≈ 20 epochs ≈ ~30
+# Measured on real Kaggle GPU session: 55,345 tok/s at width=4096. ~5.21M discovery_train
+# tokens / batch_size below ≈ ~1,273 steps/epoch ≈ 94s/epoch. 24,000 steps ≈ 19 epochs ≈ ~31
 # min training time — a first look, not a final number; extend if val_mse/explained_variance
 # are still improving at the end. Kept equal to the TopK config's total_steps for a fair
 # same-budget comparison between the two architectures.
