@@ -81,3 +81,20 @@ def test_default_output_pattern_takes_result_files_and_skips_checkpoints_and_the
 
     assert all(pattern.search(path) for path in wanted)
     assert not any(pattern.search(path) for path in skipped)
+
+
+def test_metadata_attaches_the_secrets_dataset_only_when_asked(kaggle_run):
+    assert kaggle_run.build_metadata("someone", "x-y", "n.ipynb")["dataset_sources"] == []
+    attached = kaggle_run.build_metadata("someone", "x-y", "n.ipynb", secrets_dataset="ptm-sae-secrets")
+    assert attached["dataset_sources"] == ["someone/ptm-sae-secrets"]
+
+
+def test_read_secrets_prefers_the_environment_over_the_env_file_and_skips_unknown_names(kaggle_run, tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text('# comment\nGH_TOKEN="from_file"\nHF_TOKEN=hf_file\nUNRELATED=x\n', encoding="utf-8")
+    monkeypatch.setenv("GH_TOKEN", "from_env")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+    assert kaggle_run.read_secrets(env_file) == {"GH_TOKEN": "from_env", "HF_TOKEN": "hf_file"}
+    assert kaggle_run.read_secrets(tmp_path / "missing.env") == {"GH_TOKEN": "from_env"}

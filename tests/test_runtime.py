@@ -132,6 +132,25 @@ def test_resolve_secret_reads_only_the_detected_platforms_store(monkeypatch):
     assert runtime.resolve_secret("PTM_TEST_SECRET") is None
 
 
+def test_resolve_secret_reads_the_attached_secrets_dataset_on_kaggle(tmp_path, monkeypatch):
+    mount = tmp_path / "ptm-sae-secrets"
+    mount.mkdir()
+    (mount / runtime.SECRETS_FILE_NAME).write_text('{"PTM_TEST_SECRET": " from_dataset "}', encoding="utf-8")
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / runtime.SECRETS_FILE_NAME).write_text("not json", encoding="utf-8")
+    monkeypatch.delenv("PTM_TEST_SECRET", raising=False)
+    monkeypatch.setattr(runtime, "KAGGLE_INPUT_DIR", tmp_path)
+
+    # Kaggle with no Secrets attached (an API-pushed kernel): the dataset file answers, a broken file is skipped ...
+    monkeypatch.setattr(runtime, "detect_platform", lambda: "kaggle")
+    assert runtime.resolve_secret("PTM_TEST_SECRET") == "from_dataset"
+    assert runtime.resolve_secret("OTHER_SECRET") is None
+
+    # ... and no other platform reads it.
+    monkeypatch.setattr(runtime, "detect_platform", lambda: "local")
+    assert runtime.resolve_secret("PTM_TEST_SECRET") is None
+
+
 def test_importing_the_runtime_module_loads_no_heavy_package():
     """Notebooks import ptm_sae.runtime before installing numpy/torch; that import must not load them."""
     code = (

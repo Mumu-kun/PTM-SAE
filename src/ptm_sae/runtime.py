@@ -26,6 +26,11 @@ Platform = Literal["kaggle", "colab", "local"]
 PROJECT_NAME = "ptm-sae-engine"
 DATA_ROOT_ENV = "PTM_SAE_DATA_ROOT"
 KAGGLE_WORKING_DIR = Path("/kaggle/working")
+KAGGLE_INPUT_DIR = Path("/kaggle/input")
+# Name of the JSON file ({"GH_TOKEN": ..., "HF_TOKEN": ..., "WANDB_API_KEY": ...}) inside the private secrets
+# dataset; the notebooks' clone cell (which runs before this module exists) spells the same name.
+SECRETS_FILE_NAME = "ptm_sae_secrets.json"
+SECRETS_FILE_PATTERNS = (f"*/{SECRETS_FILE_NAME}", f"*/*/{SECRETS_FILE_NAME}")  # mount depth differs between Kaggle images
 
 # Cloud runtimes ship a CUDA-matched build of these; letting pip re-resolve them from
 # pyproject.toml would silently swap in a generic (non-GPU) wheel.
@@ -132,7 +137,7 @@ def resolve_secret(name: str, explicit: str | None = None) -> str | None:
     1. Explicit argument.
     2. Environment variable `name`.
     3. Google Colab Secrets.
-    4. Kaggle Secrets.
+    4. Kaggle Secrets, then the secrets file of an attached private Kaggle Dataset.
 
     Returns None if no tier has it; callers add their own further fallbacks.
     """
@@ -163,6 +168,16 @@ def resolve_secret(name: str, explicit: str | None = None) -> str | None:
                 return kaggle_val.strip()
         except Exception:  # noqa: BLE001, S110
             pass
+
+        # A kernel pushed through the API has no Secrets attached; it reads them from the private
+        # secrets dataset listed in its dataset_sources (`scripts/kaggle_run.py secrets` makes it).
+        for pattern in SECRETS_FILE_PATTERNS:
+            for secrets_file in KAGGLE_INPUT_DIR.glob(pattern):
+                try:
+                    if value := json.loads(secrets_file.read_text(encoding="utf-8")).get(name):
+                        return str(value).strip()
+                except (OSError, ValueError):
+                    continue
 
     return None
 

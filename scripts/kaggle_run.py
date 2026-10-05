@@ -8,17 +8,28 @@ Verify the notebook first (smoke mode locally / on the GPU box, then on a Kaggle
     uv run --extra kaggle python scripts/kaggle_run.py output --slug ptm-sae-corpus-build --out runs/corpus
 
 A pushed notebook cannot receive environment variables, so `--mode` is written into the pushed copy
-(it replaces the default of PTM_SAE_MODE). Secrets (HF_TOKEN, WANDB_API_KEY, GH_TOKEN) are not part
-of the push: attach them to the notebook once in the Kaggle UI (Add-ons -> Secrets); the notebook's
-preflight cell reports which are missing, by name only. Credentials come from ~/.kaggle/kaggle.json.
+(it replaces the default of PTM_SAE_MODE). It cannot receive Kaggle Secrets either, so the secrets
+(GH_TOKEN, HF_TOKEN, WANDB_API_KEY) travel in a private Kaggle Dataset that every push attaches:
+
+    uv run --extra kaggle python scripts/kaggle_run.py secrets     # once, and after rotating a token
+
+reads them from the environment or the gitignored .env and publishes ptm-sae-secrets (names are printed,
+values never). Use fine-grained, expiring tokens: the dataset holds them at rest. `push --no-secrets`
+skips the attachment. The notebook's preflight cell reports which secrets are missing, by name only.
+Credentials come from ~/.kaggle/kaggle.json.
 """
 
 import argparse
 import json
 import re
+import os
 import tempfile
 from pathlib import Path
 
+from ptm_sae.runtime import SECRETS_FILE_NAME
+
+SECRETS_DATASET_SLUG = "ptm-sae-secrets"
+SECRET_NAMES = ("GH_TOKEN", "HF_TOKEN", "WANDB_API_KEY")
 RESULT_FILES = r"(state\.json|benchmark\.json|metrics\.jsonl|\.log)$"  # what analysis reads; checkpoints and the data cache are GBs
 
 
@@ -51,8 +62,9 @@ def inject_mode(
     return patched
 
 
-def build_metadata(username: str, slug: str, notebook_file: str, gpu: bool = False) -> dict:
-    """kernel-metadata.json for a private notebook with internet on (the data steps need it)."""
+def build_metadata(username: str, slug: str, notebook_file: str, gpu: bool = False, secrets_dataset: str | None = None) -> dict:
+    """kernel-metadata.json for a private notebook with internet on (the data steps need it).
+    `secrets_dataset` (a slug under `username`) is attached so the notebook can read its secrets file."""
     return {
         "id": f"{username}/{slug}",
         "title": slug.replace("-", " "),  # Kaggle derives the slug from the title: they must match
@@ -63,11 +75,23 @@ def build_metadata(username: str, slug: str, notebook_file: str, gpu: bool = Fal
         "enable_gpu": str(gpu).lower(),
         "enable_tpu": "false",
         "enable_internet": "true",
-        "dataset_sources": [],
+        "dataset_sources": [f"{username}/{secrets_dataset}"] if secrets_dataset else [],
         "competition_sources": [],
         "kernel_sources": [],
         "model_sources": [],
     }
+
+
+def read_secrets(env_file: Path) -> dict[str, str]:
+    """The secrets named in SECRET_NAMES: the environment first, then KEY=VALUE lines of `env_file`."""
+    from_file = {}
+    if env_file.is_file():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.strip().partition("=")
+            if separator and not key.startswith("#"):
+                from_file[key.strip()] = value.strip().strip("\"'")
+    found = {name: os.environ.get(name) or from_file.get(name) for name in SECRET_NAMES}
+    return {name: value for name, value in found.items() if value}
 
 
 def _api():
@@ -87,6 +111,9 @@ def main() -> None:
     push.add_argument("--mode", choices=["smoke", "real"], default="real")
     push.add_argument("--param", action="append", default=[], metavar="NAME=VALUE", help="set another notebook parameter default, e.g. PTM_SAE_QUICK=1 (repeatable)")
     push.add_argument("--gpu", action="store_true", help="GPU accelerator (default: CPU only, saves the weekly GPU quota)")
+    push.add_argument("--no-secrets", action="store_true", help=f"do not attach the {SECRETS_DATASET_SLUG} dataset (the notebook then needs no secrets)")
+    secrets_cmd = sub.add_parser("secrets", help=f"publish {SECRETS_DATASET_SLUG}, the private dataset that carries the secrets to pushed notebooks")
+    secrets_cmd.add_argument("--env-file", type=Path, default=Path(".env"), help="KEY=VALUE file read after the environment (default: .env)")
     for name in ("status", "output"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--slug", required=True)
@@ -95,6 +122,19 @@ def main() -> None:
     args = parser.parse_args()
 
     api, username = _api()
+
+    if args.command == "secrets":
+        from ptm_sae.extraction.hub import publish_kaggle_dataset
+
+        secrets = read_secrets(args.env_file)
+        print(f"found: {sorted(secrets) or 'none'}; missing: {sorted(set(SECRET_NAMES) - set(secrets)) or 'none'}")
+        if not secrets:
+            raise SystemExit(f"no secret found in the environment or {args.env_file}")
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / SECRETS_FILE_NAME).write_text(json.dumps(secrets), encoding="utf-8")
+            publish_kaggle_dataset(Path(folder), f"{username}/{SECRETS_DATASET_SLUG}", "ptm sae secrets", "refresh secrets")
+        return
+
     kernel = f"{username}/{args.slug}"
 
     if args.command == "push":
@@ -103,10 +143,10 @@ def main() -> None:
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             (folder / args.notebook.name).write_text(json.dumps(notebook, indent=1), encoding="utf-8")
-            metadata = build_metadata(username, args.slug, args.notebook.name, args.gpu)
+            metadata = build_metadata(username, args.slug, args.notebook.name, args.gpu, None if args.no_secrets else SECRETS_DATASET_SLUG)
             (folder / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             print(api.kernels_push(str(folder)))
-        print(f"pushed {kernel} (mode={args.mode}, gpu={args.gpu}); status: python scripts/kaggle_run.py status --slug {args.slug}")
+        print(f"pushed {kernel} (mode={args.mode}, gpu={args.gpu}, secrets={'off' if args.no_secrets else SECRETS_DATASET_SLUG}); status: python scripts/kaggle_run.py status --slug {args.slug}")
     elif args.command == "status":
         status = api.kernels_status(kernel)
         print(f"{kernel}: {status.status} {getattr(status, 'failure_message', None) or ''}")

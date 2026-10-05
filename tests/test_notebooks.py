@@ -78,6 +78,16 @@ def test_a_failed_clone_cannot_print_the_github_token(name):
 
 
 @pytest.mark.parametrize("name", NOTEBOOKS)
+def test_clone_cell_reads_the_secrets_dataset_the_runtime_reads(name):
+    """The clone cell runs before ptm_sae exists, so it spells the secrets file name itself: it must match."""
+    from ptm_sae.runtime import SECRETS_FILE_NAME
+
+    setup = next(src for src in _code_cells(name) if "x-access-token" in src)
+
+    assert f'"*/{SECRETS_FILE_NAME}"' in setup and f'"*/*/{SECRETS_FILE_NAME}"' in setup
+
+
+@pytest.mark.parametrize("name", NOTEBOOKS)
 def test_the_final_summary_cell_cannot_be_what_fails_a_run(name):
     """After an install failure numpy/pandas can be broken, so the last cell must import nothing from
     the package (observed: it crashed on `from ptm_sae.corpus.config import ...` and ended the run)."""
