@@ -1,8 +1,7 @@
 """M1 -- Acquisition. Ported from N1.ipynb cell 5.
 
 Inputs: none. Emits: raw data under `CorpusPaths.raw_dir`; a Manifest (SHA sums + access dates).
-Sources: UniProt/Swiss-Prot, CPLM 4.0 (human), dbPTM 2025 (37 types), qPTM (Human/Mouse/Rat/
-Yeast), O-GlcNAcAtlas 5.0, N-GlycositeAtlas, N-GlyDE (via StackGlyEmbed).
+Sources: UniProt/Swiss-Prot, CPLM 4.0 (human), dbPTM 2025 (37 types), O-GlcNAcAtlas 5.0, N-GlycositeAtlas, N-GlyDE (via StackGlyEmbed).
 
 Kaggle-path assumptions removed -- every function here takes `raw_dir: Path` explicitly (callers
 pass `CorpusPaths.raw_dir`). OOD-species acquisition (mouse/rat/yeast/E. coli) is N1's own M2/M3
@@ -17,8 +16,6 @@ from __future__ import annotations
 
 import gzip
 import io
-import os
-import shutil
 import tarfile
 import time
 import zipfile
@@ -87,16 +84,6 @@ STACKGLYEMBED_BASE = (
 )
 GLYCOSITE_ATLAS_URL = "http://nglycositeatlas.biomarkercenter.org/download/HumanAll/"
 
-QPTM_FORM_URL = "https://qptm.omicsbio.info/download.php"
-QPTM_DIRECT_URL: str | None = os.environ.get("QPTM_ACCESS_TOKEN")
-QPTM_NOTE = (
-    "QPTM_ACCESS_TOKEN is unset -- qptm.omicsbio.info/download.php is a gated request form, not "
-    "a static file endpoint. Submit that form once by hand to get a real link, then set it as the "
-    "QPTM_ACCESS_TOKEN environment variable (not in this file). "
-    "acquire_qptm() raises rather than silently downloading the form page."
-)
-
-
 def download_file(
     url: str,
     dest: Path,
@@ -146,29 +133,6 @@ def download_file(
         f"[download_file] Giving up after {max_retries} attempts for {url} -- "
         f"last error: {type(last_exc).__name__}: {last_exc}"
     ) from last_exc
-
-
-def _download_and_extract_zip_member(
-    url: str, dest: Path, timeout: int = 600, chunk_size: int = 1 << 20
-) -> Path:
-    """Downloads a ZIP, extracts its largest member to `dest` as raw bytes (decode deferred to
-    whatever reads `dest` later). The ZIP download itself goes through `download_file` for
-    retry-with-backoff + atomic write; only local zip extraction keeps its own `.ziptmp`
-    handling."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    zip_path = dest.with_suffix(dest.suffix + ".ziptmp")
-    download_file(url, zip_path, timeout=timeout, chunk_size=chunk_size)
-    with zipfile.ZipFile(zip_path) as zf:
-        members = [m for m in zf.infolist() if not m.is_dir()]
-        if not members:
-            raise ValueError(
-                f"_download_and_extract_zip_member: {url} zip has no file members"
-            )
-        member = max(members, key=lambda m: m.file_size)
-        with zf.open(member) as src, open(dest, "wb") as out:
-            shutil.copyfileobj(src, out, length=chunk_size)
-    zip_path.unlink(missing_ok=True)
-    return dest
 
 
 def _resolve_raw(raw_dir: Path, rel_path: str) -> Path | None:
@@ -238,82 +202,6 @@ def acquire_cplm(
         )
         out[sp] = dest
     return out
-
-
-def acquire_qptm(
-    raw_dir: Path, manifest: Manifest, mock: bool = False, force: bool = False
-) -> Path:
-    """CF-26: the independent-curation replication label set -- Human/Mouse/Rat/Yeast site-level
-    PTMs in one table (a ZIP containing one large TSV, extracted via
-    `_download_and_extract_zip_member`)."""
-    rel = "qptm/qptm_all_data.tsv"
-    dest = raw_dir / rel
-    cached = None if force else _resolve_raw(raw_dir, rel)
-    if cached is not None:
-        manifest.log(
-            "qPTM (CF-26 replication set)",
-            QPTM_DIRECT_URL or QPTM_FORM_URL,
-            cached,
-            "CACHED (reused, not re-downloaded)",
-        )
-        return cached
-    if mock:
-        _write_mock_qptm(dest, n_sites=180)
-    else:
-        if not QPTM_DIRECT_URL:
-            raise RuntimeError(QPTM_NOTE)
-        _download_and_extract_zip_member(QPTM_DIRECT_URL, dest)
-    manifest.log(
-        "qPTM (CF-26 replication set)",
-        QPTM_DIRECT_URL or QPTM_FORM_URL,
-        dest,
-        "Human/Mouse/Rat/Yeast; species filter to human applied downstream (M3)",
-    )
-    return dest
-
-
-def parse_qptm_flatfile(path: Path) -> pd.DataFrame:
-    """qPTM site table -> (accession, position, type, species, pmid, reliability)."""
-    raw = _read_flatfile_tsv(path)
-    col_map = {
-        "accession": _match_column(
-            list(raw.columns), ["uniprot", "accession", "protein", "protein id"]
-        ),
-        "position": _match_column(list(raw.columns), ["position", "site"]),
-        "type": _match_column(
-            list(raw.columns),
-            ["modification", "ptm type", "modification type", "ptm", "type"],
-        ),
-        "species": _match_column(list(raw.columns), ["species", "organism"]),
-        "pmid": _match_column(list(raw.columns), ["pmid", "reference"]),
-        "reliability": _match_column(list(raw.columns), ["reliability"]),
-    }
-    missing = [
-        k for k, v in col_map.items() if v is None and k not in ("pmid", "reliability")
-    ]
-    if missing:
-        raise ValueError(
-            f"parse_qptm_flatfile: missing columns {missing} in {path.name}: {list(raw.columns)}"
-        )
-    out = pd.DataFrame(
-        {
-            "accession": raw[col_map["accession"]].astype(str),
-            "position": pd.to_numeric(raw[col_map["position"]], errors="coerce").astype(
-                "Int64"
-            ),
-            "type": raw[col_map["type"]].astype(str),
-            "species": raw[col_map["species"]].astype(str),
-            "pmid": raw[col_map["pmid"]].astype(str) if col_map["pmid"] else pd.NA,
-            "reliability": (
-                pd.to_numeric(raw[col_map["reliability"]], errors="coerce").astype(
-                    "Int64"
-                )
-                if col_map["reliability"]
-                else pd.NA
-            ),
-        }
-    )
-    return out.dropna(subset=["accession", "position"])
 
 
 def acquire_dbptm(
@@ -818,45 +706,6 @@ def _write_mock_oglcnac(dest: Path, dataset: str, n_sites: int = 100, seed: int 
     dest.write_bytes(pd.DataFrame(rows).to_csv(index=False).encode("cp1252"))
 
 
-def _write_mock_qptm(dest: Path, n_sites: int = 180, seed: int = 6):
-    import random
-
-    rng = random.Random(seed)  # noqa: S311 -- deterministic mock-fixture generator, not crypto
-    organisms = (
-        ["Human"] * int(n_sites * 0.8)
-        + ["Mouse"] * int(n_sites * 0.15)
-        + ["Yeast"] * int(n_sites * 0.05)
-    )
-    while len(organisms) < n_sites:
-        organisms.append("Human")
-    rng.shuffle(organisms)
-    ptm_types = ["Phosphorylation", "Acetylation", "Ubiquitination", "Succinylation"]
-    rows = []
-    for i, org in enumerate(organisms):
-        rows.append(
-            {
-                "Organism": org,
-                "PMID": 20000000 + i,
-                "UniProt accession": f"P{40000 + (i % 60)}",
-                "Gene name": f"MOCK{i % 60}",
-                "Position": rng.randint(1, 500),
-                "PTM": rng.choice(ptm_types),
-                "Sequence window": _random_seq(rng, 15),
-                "Raw peptide": _random_seq(rng, 12),
-                "Sample": "MockCellLine",
-                "Condition": "Treatment/Ctr",
-                "Log2Ratio (peptide)": round(rng.uniform(-3, 3), 3),
-                "P value (peptide)": round(rng.random(), 4),
-                "Log2Ratio (protein)": "-",
-                "P value (protein)": "-",
-                "Reliability": rng.choice([2, 5]),
-                "fdr (peptide)": round(rng.random() * 0.01, 6),
-            }
-        )
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_csv(dest, sep="\t", index=False)
-
-
 def _write_mock_stackglyembed_fasta_pairs(
     dest: Path, n_proteins: int = 15, seed: int = 4
 ):
@@ -926,7 +775,7 @@ def run_m1(
     raw_dir = paths.raw_dir
     print(f"[M1] mock={mock} force={force} raw_dir={raw_dir}")
 
-    pbar = tqdm(total=7, desc="[M1] Acquisition", unit="source")
+    pbar = tqdm(total=6, desc="[M1] Acquisition", unit="source")
     resolved: dict[str, object] = {}
     pbar.set_postfix_str("swissprot")
     resolved["swissprot"] = acquire_uniprot(raw_dir, manifest, mock=mock, force=force)
@@ -938,19 +787,6 @@ def run_m1(
     pbar.update(1)
     pbar.set_postfix_str("dbptm")
     resolved["dbptm"] = acquire_dbptm(raw_dir, manifest, mock=mock, force=force)
-    pbar.update(1)
-    pbar.set_postfix_str("qptm")
-    try:
-        resolved["qptm"] = acquire_qptm(
-            raw_dir, manifest, mock=mock, force=force
-        )  # CF-26: required, not optional
-    except RuntimeError as e:
-        if not mock:
-            print(
-                f"[M1] HELD: qPTM acquisition skipped ({e}). Re-run M1 once QPTM_ACCESS_TOKEN is set."
-            )
-        else:
-            raise
     pbar.update(1)
     pbar.set_postfix_str("oglcnac_atlas")
     resolved["oglcnac_atlas"] = acquire_oglcnac_atlas(

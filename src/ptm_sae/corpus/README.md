@@ -1,6 +1,6 @@
 # `ptm_sae.corpus`
 
-Ports the partner's `src/ptm_eval/N1.ipynb` (Swiss-Prot acquisition -> CD-HIT clustering ->
+Ports the partner's `docs/reference/N1.ipynb` (Swiss-Prot acquisition -> CD-HIT clustering ->
 PTM label cascade) into importable modules. See
 `proposal/` and the implementation plan for the full design rationale; this file covers only the
 one operational dependency this subpackage needs that `uv` cannot install for you.

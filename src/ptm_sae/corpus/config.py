@@ -1,6 +1,6 @@
 """Paths, Config, and the caching/fingerprint scaffold shared by acquisition/clustering/labels.
 
-Ported from the partner's `src/ptm_eval/N1.ipynb` (cell 3, "M0 -- Configuration & Design
+Ported from the partner's `docs/reference/N1.ipynb` (cell 3, "M0 -- Configuration & Design
 Invariants"). The Kaggle-path branching (`/kaggle/working`, `/kaggle/input`, `/kaggle/temp`) is
 removed entirely -- `CorpusPaths` is env-var driven instead, with no Kaggle/local flag.
 """
@@ -11,9 +11,7 @@ import dataclasses
 import hashlib
 import json
 import os
-import shutil
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -92,54 +90,11 @@ class CorpusPaths:
 class Config:
     # Corpus
     max_protein_length: int = 1022
-    organism_primary: str = "human"
     swissprot_reviewed_only: bool = True
 
     # Label filters
     min_sites_per_type: int = 200
     min_sites_headline: int = 1000
-    min_source_count_high_confidence: int = 2
-
-    # qPTM's 0-5 reliability score floor (sites seen in >=N independent datasets). See
-    # N1_CHANGELOG.md #22/#24 for the sensitivity sweep behind this default.
-    qptm_reliability_floor: int = 2
-
-    # Out-of-distribution species -- carried over from N1 for config-fingerprint parity, though
-    # nothing in this subpackage builds the OOD corpora/labels (that is N1's own M2/M3 extension,
-    # out of scope for this port).
-    ood_species: dict = dataclasses.field(
-        default_factory=lambda: {
-            "mouse": {
-                "taxon_id": "10090",
-                "uniprot_suffix": "MOUSE",
-                "cplm_species": "Mus musculus",
-                "qptm_label": "mouse",
-                "oglcnac_label": "mouse",
-            },
-            "rat": {
-                "taxon_id": "10116",
-                "uniprot_suffix": "RAT",
-                "cplm_species": "Rattus norvegicus",
-                "qptm_label": "rat",
-                "oglcnac_label": "rat",
-            },
-            "yeast": {
-                "taxon_id": "559292",
-                "uniprot_suffix": "YEAST",
-                "cplm_species": "Saccharomyces cerevisiae (strain ATCC 204508 or S288c)",
-                "qptm_label": "yeast",
-                "oglcnac_label": "yeast",
-            },
-            "ecoli": {
-                "taxon_id": "83333",
-                "uniprot_suffix": "ECOLI",
-                "cplm_species": "Escherichia coli (strain K12)",
-                "qptm_label": None,
-                "oglcnac_label": None,
-            },
-        }
-    )
-    ood_min_sites_per_type: int = 200
 
     # Redundancy -- 40% identity, per the user's decision (see the implementation plan).
     cdhit_identity: float = 0.40
@@ -321,12 +276,6 @@ def normalize_ptm_type(
     return raw_type
 
 
-def type_to_stratum(raw_type: str) -> str:
-    """Convenience for reporting: canonical stratum for a raw type string, or 'UNMAPPED'."""
-    canonical = normalize_ptm_type(raw_type, known_types=set(CFG.ptm_type_to_stratum))
-    return CFG.ptm_type_to_stratum.get(canonical, "UNMAPPED")
-
-
 # ---------------------------------------------------------------------------
 # Caching layer, shared by M1/M2/M3. Every cached artefact is paired with a fingerprint sidecar
 # (`<file>.fp`), checked before reuse, so a config change can never silently reuse stale output.
@@ -354,55 +303,6 @@ def find_cached(filename: str, search_dirs: list[Path] | None = None) -> Path | 
     return None
 
 
-@dataclass
-class CacheResult:
-    path: Path
-    was_cached: bool
-    source: str  # "cache" | "built"
-
-
-def ensure_artifact(
-    filename: str,
-    build_fn: Callable[[Path], None],
-    *,
-    dest_dir: Path,
-    search_dirs: list[Path] | None = None,
-    expected_fingerprint: str | None = None,
-    force: bool = False,
-) -> CacheResult:
-    """Core cache-or-build primitive."""
-    dest = dest_dir / filename
-
-    if not force:
-        hit = find_cached(filename, search_dirs=search_dirs or [dest_dir])
-        if hit is not None:
-            fp_ok = True
-            if expected_fingerprint is not None:
-                fp_sidecar = hit.with_suffix(hit.suffix + ".fp")
-                fp_ok = (
-                    fp_sidecar.exists()
-                    and fp_sidecar.read_text().strip() == expected_fingerprint
-                )
-            if fp_ok:
-                if hit != dest:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(hit, dest)
-                    if expected_fingerprint is not None:
-                        dest.with_suffix(dest.suffix + ".fp").write_text(
-                            expected_fingerprint
-                        )
-                return CacheResult(path=dest, was_cached=True, source="cache")
-            print(
-                f"[cache] {filename}: cached copy found but fingerprint is stale -- rebuilding."
-            )
-
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    build_fn(dest)
-    if expected_fingerprint is not None:
-        dest.with_suffix(dest.suffix + ".fp").write_text(expected_fingerprint)
-    return CacheResult(path=dest, was_cached=False, source="built")
-
-
 def config_fingerprint(*extra, cfg: Config = None) -> str:
     """Fingerprint of every config field that affects M2/M3's output content. Pass upstream
     artefact hashes (e.g. an M1 manifest digest) as `extra` to also invalidate on raw-input
@@ -420,8 +320,6 @@ def config_fingerprint(*extra, cfg: Config = None) -> str:
         "ptm_type_to_stratum": cfg.ptm_type_to_stratum,
         "primary_types": cfg.primary_types,
         "stratum_residues": {k: sorted(v) for k, v in cfg.stratum_residues.items()},
-        "qptm_reliability_floor": cfg.qptm_reliability_floor,
-        "ood_min_sites_per_type": cfg.ood_min_sites_per_type,
     }
     return fingerprint(relevant, *extra)
 
