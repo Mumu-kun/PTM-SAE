@@ -144,3 +144,28 @@ def test_pull_dest_is_the_parent_of_what_is_asked_for_and_stays_in_the_project(r
     for outside in ("../x", "/etc/passwd"):
         with pytest.raises(ValueError):
             remote_box.pull_dest(tmp_path, outside)
+
+
+def test_forward_args_listen_locally_and_stop_when_the_forward_fails(remote_box):
+    args = remote_box.forward_args(8080, 6006)
+
+    assert args[args.index("-L") + 1] == "8080:127.0.0.1:6006"  # bound to 127.0.0.1 on both ends
+    assert "-N" in args and "ExitOnForwardFailure=yes" in args
+
+
+def test_ssh_alive_is_false_without_a_recorded_pid(remote_box):
+    assert remote_box.ssh_alive(None) is False
+    assert remote_box.ssh_alive(0) is False
+
+
+def test_tunnel_state_survives_a_round_trip_and_down_forgets_it(remote_box, monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_box, "STATE", tmp_path / ".scratch" / "state.json")
+    remote_box.save_state({"forward_pid": 7, "tunnels": {"8080": {"pid": 0, "remote": 6006}}})
+    assert remote_box.load_state()["tunnels"]["8080"]["remote"] == 6006
+
+    remote_box.tunnel("down", 8080, None)  # pid 0 is never "alive", so nothing is killed
+
+    state = remote_box.load_state()
+    assert state["tunnels"] == {} and state["forward_pid"] == 7  # Jupyter's forward is untouched
+    with pytest.raises(SystemExit):
+        remote_box.tunnel("up", None, None)  # needs the box's port

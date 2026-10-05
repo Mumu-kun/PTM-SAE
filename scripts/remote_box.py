@@ -10,6 +10,7 @@ resolve_secret() finds them. After editing .env, `kernel down` + `kernel up` so 
     uv run python scripts/remote_box.py setup                          # uv sync on the box + register the kernel
     uv run python scripts/remote_box.py kernel up|down                 # Jupyter server (tmux, idle-culled) + local port forward
     uv run python scripts/remote_box.py kernel list|restart [NOTEBOOK|ID]  # which kernels run what; restart one or all
+    uv run python scripts/remote_box.py tunnel up|down|list [PORT]     # open a web tool on the box (TensorBoard, ...) at 127.0.0.1 here
     uv run python scripts/remote_box.py exec [--tmux NAME] -- <command>  # run anything in the repo dir on the box
     uv run python scripts/remote_box.py pull [PATH]                    # fetch PATH (project-relative, default runs/) from the box
 
@@ -206,10 +207,10 @@ def remote(command: str, *, input: str | None = None, capture: bool = False, che
     return done
 
 
-def port_open() -> bool:
+def port_open(port: int = JUPYTER_PORT) -> bool:
     with socket.socket() as probe:
         probe.settimeout(1)
-        return probe.connect_ex(("127.0.0.1", JUPYTER_PORT)) == 0
+        return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
 def jupyter_token() -> str:
@@ -259,9 +260,17 @@ def restart_kernels(mode: str = "restart", target: str = "") -> None:
     )
 
 
-def forward_alive(state: dict) -> bool:
-    """Is the recorded forward still our ssh? A bare PID is only a hint: after a reboot it may belong to anything."""
-    pid = state.get("forward_pid")
+def load_state() -> dict:
+    return json.loads(STATE.read_text()) if STATE.exists() else {}
+
+
+def save_state(state: dict) -> None:
+    STATE.parent.mkdir(exist_ok=True)
+    STATE.write_text(json.dumps(state))
+
+
+def ssh_alive(pid: int | None) -> bool:
+    """Is `pid` still one of our ssh forwards? A bare PID is only a hint: after a reboot it may belong to anything."""
     if not pid:
         return False
     if os.name == "nt":
@@ -270,11 +279,59 @@ def forward_alive(state: dict) -> bool:
     return "ssh" in subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True).stdout  # noqa: S603, S607 -- fixed arguments
 
 
-def stop_forward() -> None:
-    state = json.loads(STATE.read_text()) if STATE.exists() else {}
-    if forward_alive(state):
-        os.kill(state["forward_pid"], signal.SIGTERM)
-    STATE.unlink(missing_ok=True)
+def forward_args(local: int, remote_port: int) -> list[str]:
+    return [ssh_exe(), *SSH_OPTS, "-o", "ExitOnForwardFailure=yes", "-N", "-L", f"{local}:127.0.0.1:{remote_port}", HOST]
+
+
+def start_forward(local: int, remote_port: int) -> subprocess.Popen:
+    """A detached `ssh -L` from this PC's `local` port to the box's `remote_port`, so it outlives this script."""
+    detach = {"creationflags": 0x00000008 | 0x00000200 | 0x08000000} if os.name == "nt" else {"start_new_session": True}
+    return subprocess.Popen(forward_args(local, remote_port), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detach)  # noqa: S603 -- our own ssh, argv list
+
+
+def stop_forward(pid: int | None) -> None:
+    if ssh_alive(pid):
+        os.kill(pid, signal.SIGTERM)
+
+
+def tunnel(action: str, port: int | None, local: int | None) -> None:
+    """Open any web tool running on the box (TensorBoard, a dashboard, ...) on this PC: its port, forwarded to
+    127.0.0.1 here. Nothing is exposed on the box's network, and the tool must listen on the box's 127.0.0.1."""
+    state = load_state()
+    tunnels = state.setdefault("tunnels", {})  # local port -> {"pid", "remote"}
+    if action == "list":
+        for local_port, entry in tunnels.items():
+            print(f"http://127.0.0.1:{local_port} -> box 127.0.0.1:{entry['remote']}", "" if ssh_alive(entry["pid"]) else "(dead)")
+        return
+    if action == "down":
+        for key in [str(port)] if port else list(tunnels):
+            stop_forward(tunnels.pop(key, {}).get("pid"))
+        save_state(state)
+        print("tunnel(s) closed")
+        return
+    if port is None:
+        sys.exit("tunnel up needs the box's port")
+    local = local or port
+    if ssh_alive(tunnels.get(str(local), {}).get("pid")):
+        sys.exit(f"tunnel on local port {local} is already up (tunnel list)")
+    if port_open(local):
+        sys.exit(f"local port {local} is already in use; pick another with --local")
+    process = start_forward(local, port)
+    try:
+        for _ in range(20):
+            if port_open(local):
+                break
+            if process.poll() is not None:
+                sys.exit("ssh could not set up the forward (is the tunnel app running? is the local port free?)")
+            time.sleep(0.5)
+        else:
+            sys.exit(f"forward did not come up on local port {local}")
+        tunnels[str(local)] = {"pid": process.pid, "remote": port}
+        save_state(state)
+    except BaseException:
+        process.terminate()  # never leave a forward nobody has a record of
+        raise
+    print(f"http://127.0.0.1:{local}  ->  box 127.0.0.1:{port}  (close with: tunnel down {local})")
 
 
 def kernel_up(idle_kernel: int, idle_server: int) -> None:
@@ -298,16 +355,13 @@ def kernel_up(idle_kernel: int, idle_server: int) -> None:
 
     # 2. Local forward, detached so it outlives this script
     started = None
-    state = json.loads(STATE.read_text()) if STATE.exists() else {}
-    if port_open() and not forward_alive(state):
+    state = load_state()
+    if port_open() and not ssh_alive(state.get("forward_pid")):
         sys.exit(f"local port {JUPYTER_PORT} is taken by something that is not our forward; change JUPYTER_PORT")
     if not port_open():
-        forward = [ssh_exe(), *SSH_OPTS, "-o", "ExitOnForwardFailure=yes", "-N", "-L", f"{JUPYTER_PORT}:127.0.0.1:{JUPYTER_PORT}", HOST]
-        detach = {"creationflags": 0x00000008 | 0x00000200 | 0x08000000} if os.name == "nt" else {"start_new_session": True}
-        started = subprocess.Popen(forward, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detach)  # noqa: S603 -- our own ssh, argv list
+        started = start_forward(JUPYTER_PORT, JUPYTER_PORT)
         try:
-            STATE.parent.mkdir(exist_ok=True)
-            STATE.write_text(json.dumps({"forward_pid": started.pid}))
+            save_state({**state, "forward_pid": started.pid})
         except BaseException:
             started.terminate()  # never leave a forward nobody has a record of
             raise
@@ -323,7 +377,7 @@ def kernel_up(idle_kernel: int, idle_server: int) -> None:
             time.sleep(1)
     else:
         if started:
-            stop_forward()  # a forward to nothing is useless; the tmux session stays so the failure can be read
+            stop_forward(started.pid)  # a forward to nothing is useless; the tmux session stays so the failure can be read
         sys.exit(f"server not answering on {url}; inspect: ssh -p 2222 {HOST} -t tmux attach -t {TMUX_SESSION} (kernel down removes it)")
     print(f"Jupyter server: {url}/?token={token}\nkernel spec to pick: {KERNEL_TITLE}")
     print(f"idle kernels stop after {idle_kernel}s, the idle server after {idle_server}s (0 = never)")
@@ -333,7 +387,9 @@ def kernel_down(force: bool) -> None:
     # Stopping the server kills its kernels, and with them any cell that is still computing.
     if restart_kernels("busy-check").returncode == 3 and not force:
         sys.exit("refusing to stop the server while kernels are busy (--force to stop anyway)")
-    stop_forward()
+    state = load_state()
+    stop_forward(state.pop("forward_pid", None))
+    save_state(state)
     remote(f"tmux kill-session -t {TMUX_SESSION} 2>/dev/null; true")
     print("server and forward stopped")
 
@@ -351,6 +407,10 @@ def main() -> None:
     kernel.add_argument("--force", action="store_true", help="restart / down: also act on busy kernels")
     kernel.add_argument("--idle-kernel", type=int, default=3600, help="up: stop kernels idle this many seconds (0 = never)")
     kernel.add_argument("--idle-server", type=int, default=7200, help="up: stop the server after this many idle seconds with no kernels (0 = never)")
+    tun = sub.add_parser("tunnel", help="open a web tool running on the box (its port) on this PC")
+    tun.add_argument("action", choices=["up", "down", "list"])
+    tun.add_argument("port", nargs="?", type=int, help="up: the port on the box; down: the local port to close (default: all)")
+    tun.add_argument("--local", type=int, help="up: local port to listen on (default: the same as the box's)")
     run = sub.add_parser("exec", help="run a command in the repo dir on the box, with the secrets loaded")
     run.add_argument("--tmux", metavar="NAME", help="detach into a tmux session, logging to runs/logs/NAME.log")
     run.add_argument("--gpu-need", type=float, metavar="GB", help=f"VRAM the run needs (default {GPU_NEED_GB:g}; 0 = no GPU check), plus {GPU_MARGIN_GB:g} GB left for others")
@@ -396,6 +456,8 @@ def main() -> None:
         setup()
     elif args.command == "kernel":
         {"up": lambda: kernel_up(args.idle_kernel, args.idle_server), "down": lambda: kernel_down(args.force), "restart": lambda: restart_kernels("force" if args.force else "restart", args.target), "list": lambda: restart_kernels("list", args.target)}[args.action]()
+    elif args.command == "tunnel":
+        tunnel(args.action, args.port, args.local)
     elif args.command == "exec":
         words = args.words[1:] if args.words[:1] == ["--"] else args.words
         if not words:

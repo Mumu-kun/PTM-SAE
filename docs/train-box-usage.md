@@ -40,6 +40,7 @@ uv run python scripts/remote_box.py <command>
 | Run a command in the repo on the box | `exec -- uv run pytest tests/ -v` (several words keep their quoting; for pipes or `&&` pass one quoted string: `exec "nvidia-smi | head -5"`) |
 | Run a long job that survives disconnects | `exec --tmux smoke -- uv run python -m ptm_sae.training.train ...` |
 | Fetch results | `pull` (all of `runs/`) or `pull checkpoints/NAME/metrics.jsonl` (any project-relative path) |
+| Open a web tool running on the box | `tunnel up 6006`, then browse `http://127.0.0.1:6006`; `tunnel down` when done |
 | Stop the server and forward | `kernel down` (refuses while a kernel is busy; `--force` overrides) |
 
 `sync` mirrors your working tree to `~/ptm-sae-engine` and deletes files there that you deleted locally.
@@ -76,6 +77,12 @@ eval, which is the first thing to try cutting if the lag persists). Faster ways 
   then `ssh -p 2222 mdsr@127.0.0.1 -t tmux attach -t NAME`, or read `runs/logs/NAME.log`).
 - **wandb LEET**, a live terminal UI that reads wandb's local run files, no upload delay:
   `exec --tty -- uv run wandb leet` (older wandb: `wandb beta leet run`).
+- **wandb's web UI after the run:** train with `WANDB_MODE=offline` (no upload during training, so no lag and no
+  uplink contention), then `exec -- .venv/bin/wandb sync wandb/offline-run-*` uploads the finished run once to
+  wandb.ai. Needs `WANDB_API_KEY` in `.env`. This is how to get the full web UI; the live view is LEET.
+- **Any web tool running on the box** (TensorBoard, a small dashboard) opens locally through
+  `tunnel up PORT` (it listens on the box's 127.0.0.1; the page appears at `http://127.0.0.1:PORT` here;
+  `tunnel list` / `tunnel down [PORT]` to inspect and close). Nothing is exposed on the box's network.
 - **`metrics.jsonl`** in the run's `checkpoint_dir`, one row per log event, written with or without wandb:
   `pull checkpoints/NAME/metrics.jsonl`, then plot it locally.
 
