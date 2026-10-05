@@ -340,8 +340,8 @@ def _peak_memory_gb(device: torch.device) -> dict[str, float]:
     what to budget) and peak host RAM. Zeros where there is nothing to measure."""
     on_gpu = device.type == "cuda"
     return {
-        "vram_reserved_peak_gb": torch.cuda.max_memory_reserved(device) / 2**30 if on_gpu else 0.0,
-        "vram_allocated_peak_gb": torch.cuda.max_memory_allocated(device) / 2**30 if on_gpu else 0.0,
+        "vram_reserved_peak_gb": torch.cuda.max_memory_reserved() / 2**30 if on_gpu else 0.0,
+        "vram_allocated_peak_gb": torch.cuda.max_memory_allocated() / 2**30 if on_gpu else 0.0,
         "host_ram_peak_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20 if resource else 0.0,  # KiB on Linux
     }
 
@@ -354,9 +354,10 @@ def run_sae_training(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     autocast_dtype = torch.bfloat16 if config.dtype == "bf16" else None
     # Shared-GPU etiquette: past its fraction this process raises OOM itself instead of squeezing out
-    # the other users. Cooperative: it caps our allocator, it reserves nothing.
+    # the other users. Cooperative: it caps our allocator, it reserves nothing. torch wants an indexed
+    # device here, and `torch.device("cuda")` has none.
     if device.type == "cuda" and config.gpu_memory_fraction is not None:
-        torch.cuda.set_per_process_memory_fraction(config.gpu_memory_fraction, device)
+        torch.cuda.set_per_process_memory_fraction(config.gpu_memory_fraction, torch.cuda.current_device())
 
     checkpoint_dir = Path(config.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
