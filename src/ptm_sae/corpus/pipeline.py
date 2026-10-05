@@ -29,10 +29,14 @@ from ptm_sae.corpus.config import CFG, CorpusPaths
 from ptm_sae.data.splitting import PARTITIONS, SplitSettings
 from ptm_sae.extraction.hub import HfSyncClient
 
-# verify_outputs tolerances: far looser than the ~0.1% / ~1% the splitter reaches, tight enough to
-# catch a regression to the old heuristic (31% mean / 100% max).
-MAX_MEAN_DEVIATION = 0.02
-MAX_FEATURE_DEVIATION = 0.05
+# verify_outputs tolerances. The splitter alone reaches ~0.1% mean / ~1% max, but the homology audit
+# merges hundreds of clusters into a few giant indivisible ones (measured on the real corpus: 423
+# merges; held-out then holds only 10.5% of the tokens in clusters >10 proteins instead of 20%, mean
+# deviation 2.2%, max 48%). The gate therefore only has to catch what matters: a regression to the
+# old heuristic (31% mean / 100% max), with the per-type site floors and exact token windows enforced
+# separately by the splitter.
+MAX_MEAN_DEVIATION = 0.03
+MAX_FEATURE_DEVIATION = 0.6
 # Residual cross-boundary homologs tolerated per audited partition. 1% of proteins biases a held-out
 # estimate by well under its sampling noise (for 200+ sites, about 7% relative), while the unmerged
 # CD-HIT@40% split leaked ~10%. cd-hit-2d is itself a heuristic, so "zero" would be false precision.

@@ -370,7 +370,9 @@ def preflight(
         if resolve_secret(name):
             add(f"secret {name}", "ok", "set")
         elif name == "HF_TOKEN":
-            add(f"secret {name}", "fail" if need_hub_write else "warn", "missing")
+            add(f"secret {name}", "warn", "missing")
+            if need_hub_write:  # the build does not need it: only publishing is lost
+                report.degraded["publish"] = "off: no HF_TOKEN attached (the outputs are kept; publish them afterwards)"
         else:
             add(f"secret {name}", "warn", "missing")
             if name == "WANDB_API_KEY":
@@ -382,8 +384,10 @@ def preflight(
             from huggingface_hub import HfApi
 
             role = HfApi(token=token).whoami().get("auth", {}).get("accessToken", {}).get("role")
-            status = {"write": "ok", "admin": "ok", "read": "fail"}.get(role, "warn")
+            status = {"write": "ok", "admin": "ok"}.get(role, "warn")
             add("hub write scope", status, f"token role: {role}")
+            if role == "read":
+                report.degraded["publish"] = "off: HF_TOKEN is read-only (the outputs are kept; publish them with a write token)"
         except Exception as exc:  # noqa: BLE001 -- a failed lookup must not look like a failed token
             add("hub write scope", "warn", f"could not verify ({type(exc).__name__})")
 

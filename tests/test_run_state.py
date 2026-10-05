@@ -111,7 +111,17 @@ def test_preflight_collects_every_problem_and_never_prints_secret_values(monkeyp
     assert "secret HF_TOKEN" in out
 
 
-def test_preflight_rejects_a_read_only_hub_token_when_writes_are_needed(monkeypatch):
+def test_a_missing_hub_token_only_turns_publishing_off(monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(runtime, "detect_platform", lambda: "local")
+
+    report = runtime.preflight(need_hub_write=True, check_internet=False)
+
+    assert report.ok  # the long build must still run
+    assert "publish" in report.degraded and "no HF_TOKEN" in report.degraded["publish"]
+
+
+def test_a_read_only_hub_token_only_turns_publishing_off(monkeypatch):
     class ReadOnlyApi:
         def __init__(self, token=None):
             pass
@@ -125,7 +135,7 @@ def test_preflight_rejects_a_read_only_hub_token_when_writes_are_needed(monkeypa
 
     report = runtime.preflight(need_hub_write=True, check_internet=False)
 
-    assert "hub write scope" in report.failures()
+    assert report.ok and "read-only" in report.degraded["publish"]
 
 
 def test_preflight_passes_when_the_environment_is_complete(monkeypatch):
