@@ -78,7 +78,12 @@ mean L0. Collapse and dominance are measured on the final model, not on `best/`.
 - **Stage 0, learning-rate probe** (`sweeps/topk_lr_probe.yaml`): 9 runs of 3,000 steps at k = 32, canaries off; width 4,096 at
   1e-4 to 1.6e-3, width 10,240 at 1e-4 to 8e-4. Purpose: the stable ceiling and best short-budget LR per width, because the literature LR was
   measured at a 131,072-token batch (here 4,096). The long runs use a quarter of it (Gao's converged-optimum ratio, checked by H4).
-- **Stage 1, dose-response grid** (`sweeps/topk_grid.yaml`, written after stage 0): width 4,096 at k in {16, 32, 64, 128, 256, 512}; width 10,240
+- **Stage 0.5, explained-variance-versus-k probe** (`sweeps/topk_k_probe.yaml`, run by `notebooks/train_sae_k_probe.ipynb` on the same Kaggle
+  slug): added after stage 0 showed that k = 32 at width 4,096 plateaus near 58% explained variance, far below the 85% gate. Five 3,000-step runs
+  at k = 64, 128, 256, 512, 1,024 (width 4,096, learning rate 4e-4, canaries off) show where the gate is reached, so the stage-1 k range is
+  chosen from data. Real Kaggle throughput measured during stage 0 (about 34k tok/s per run, 60-63k aggregate on two T4s, CPU-bound by the
+  data loader) sets the cost of everything after it.
+- **Stage 1, dose-response grid** (`sweeps/topk_grid.yaml`, written after stages 0 and 0.5): width 4,096 at k in {16, 32, 64, 128, 256, 512}; width 10,240
   at k in {64, 128, 256}; 2 extra seeds at the reference cell (k = 64, width 4,096); that cell at 2x LR (H4); AuxK-on (`auxk_coefficient: 0.03125`)
   at width 4,096 with k = 16, 64, 256 and at width 10,240 with k = 64 (H5): 16 runs; 24,000 steps at width 4,096 and about 41,000 at 10,240
   (tokens to convergence grow about width^0.6); canaries on.

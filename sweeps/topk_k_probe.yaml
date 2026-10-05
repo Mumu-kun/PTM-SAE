@@ -1,0 +1,20 @@
+# Stage 0.5 of the TopK sweep (rationale: docs/research/topk-sweep-design.md): an explained-variance-versus-k probe.
+# Stage 0 showed that k = 32 at width 4,096 plateaus near 58% explained variance, far below the 85% gate, so the
+# stage-1 grid needs to know where the gate is reached. Short runs (3,000 steps), the learning rate that was best at
+# that budget in stage 0 (4e-4; revisit if the finished stage-0 results change the picture), collapse canaries off.
+# Read the EV curve of each run, not only its final value: compare EV at 2,000 and 3,000 steps per k, and extend any k whose curve is still rising
+# (stage 0 showed the k = 32 plateau is reached by about step 2,000 at this learning rate).
+# Run on Kaggle through notebooks/train_sae_k_probe.ipynb (this spec is its default) or anywhere with:
+#   uv run python -m ptm_sae.training.sweep --spec sweeps/topk_k_probe.yaml
+
+base_config: configs/train_topk_baseline.yaml
+group: topk_k_probe
+tags: [ablation-phase2, k-probe]
+max_parallel: 4  # measured on Kaggle (2x T4): the concurrency benchmark chose 4 (aggregate 63k tok/s), so the benchmark is skipped
+
+runs:
+  - {name: w4096_k64,   set: {d_hidden: 4096, k: 64,   learning_rate: 0.0004, total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w4096_k128,  set: {d_hidden: 4096, k: 128,  learning_rate: 0.0004, total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w4096_k256,  set: {d_hidden: 4096, k: 256,  learning_rate: 0.0004, total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w4096_k512,  set: {d_hidden: 4096, k: 512,  learning_rate: 0.0004, total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w4096_k1024, set: {d_hidden: 4096, k: 1024, learning_rate: 0.0004, total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}

@@ -276,3 +276,17 @@ def test_every_shipped_sweep_spec_expands_and_applies_to_its_base_config(spec_pa
     assert runs
     for run in runs:
         base.with_overrides([f"{key}={value}" for key, value in run.overrides.items()])
+
+
+def test_k_probe_spec_varies_only_k_at_width_4096():
+    """Stage 0.5 (docs/research/topk-sweep-design.md): where does explained variance reach the gate? One width, one
+    learning rate, k from 64 up to a quarter of the dictionary, short runs, canaries off, concurrency pinned."""
+    spec = yaml.safe_load((SWEEPS / "topk_k_probe.yaml").read_text(encoding="utf-8"))
+
+    runs = sweep.expand_runs(spec)
+
+    assert [r.overrides["k"] for r in runs] == [64, 128, 256, 512, 1024]
+    assert {r.overrides["d_hidden"] for r in runs} == {4096}
+    assert {r.overrides["learning_rate"] for r in runs} == {0.0004}
+    assert all(r.overrides["total_steps"] == 3000 and not r.overrides["enable_collapse_check"] for r in runs)
+    assert spec["max_parallel"] == 4

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-NOTEBOOKS = ("notebooks/kaggle_pipeline.ipynb", "notebooks/train_sae.ipynb")
+NOTEBOOKS = ("notebooks/kaggle_pipeline.ipynb", "notebooks/train_sae.ipynb", "notebooks/train_sae_k_probe.ipynb")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LONG_JOB_CALLS = ("run_logged(", "upload_to_hf(", "fetch_run(", "publish_kaggle_dataset(")
 
@@ -106,3 +106,20 @@ def test_training_notebook_syncs_data_before_any_training_cell():
     assert index_of("data") < index_of("train")
     # a sweep replaces the single run, never both
     assert "if SWEEP_SPEC:" in cells[index_of("train")] and "if not SWEEP_SPEC:" in cells[index_of("sweep")]
+
+
+def test_k_probe_notebook_differs_from_the_training_notebook_only_in_its_parameter_defaults():
+    """The k probe is the training notebook with two different defaults (and its own title). Any other difference is
+    drift: a fix made to one copy and forgotten in the other."""
+    probe_defaults = {
+        'os.environ.get("PTM_SAE_SWEEP_SPEC", "sweeps/topk_k_probe.yaml")': 'os.environ.get("PTM_SAE_SWEEP_SPEC", "")',
+        'os.environ.get("PTM_SAE_BENCHMARK", "0")': 'os.environ.get("PTM_SAE_BENCHMARK", "1")',
+    }
+    training = _code_cells("notebooks/train_sae.ipynb")
+    probe = _code_cells("notebooks/train_sae_k_probe.ipynb")
+
+    assert len(probe) == len(training)
+    for probe_cell, training_cell in zip(probe, training, strict=True):
+        for new, old in probe_defaults.items():
+            probe_cell = probe_cell.replace(new, old)
+        assert probe_cell == training_cell
