@@ -33,6 +33,10 @@ from ptm_sae.extraction.hub import HfSyncClient
 # catch a regression to the old heuristic (31% mean / 100% max).
 MAX_MEAN_DEVIATION = 0.02
 MAX_FEATURE_DEVIATION = 0.05
+# Residual cross-boundary homologs tolerated per audited partition. 1% of proteins biases a held-out
+# estimate by well under its sampling noise (for 200+ sites, about 7% relative), while the unmerged
+# CD-HIT@40% split leaked ~10%. cd-hit-2d is itself a heuristic, so "zero" would be false precision.
+MAX_LEAK_FRACTION = 0.01
 
 ARTIFACT_FILENAMES = [
     "corpus.parquet",
@@ -359,11 +363,16 @@ def verify_outputs(paths: CorpusPaths | None = None, mock: bool = False) -> list
     if mock:
         return problems
 
-    # 2. Homology audit: the last pass must have run and found nothing
+    # 2. Homology audit: the last pass must have run, with the residual leak fraction within tolerance
     final_pass = (manifest.get("homology_audit") or [{}])[-1]
     if final_pass.get("skipped"):
         problems.append("homology audit was skipped")
-    elif final_pass.get("cross_partition_pairs", 1) > 0:
+    elif "leaks" in final_pass:
+        for name, leaks in final_pass["leaks"].items():
+            fraction = leaks / max(final_pass["queries"][name], 1)
+            if fraction > MAX_LEAK_FRACTION:
+                problems.append(f"{leaks} of {final_pass['queries'][name]} {name} proteins ({fraction:.2%}) still have a homolog across the boundary (tolerance {MAX_LEAK_FRACTION:.1%})")
+    elif final_pass.get("cross_partition_pairs", 1) > 0:  # manifests written before per-boundary counts
         problems.append(f"{final_pass.get('cross_partition_pairs')} cross-partition pairs remain after the last audit pass")
 
     # 3. Balance

@@ -293,6 +293,8 @@ def iterative_stratified_split(
 
 # (reference partitions, query partition): cd-hit-2d reports every query sequence that reaches the
 # identity threshold against any reference sequence -- i.e. a homology leak across that boundary.
+QUERY_PARTITIONS = ("held_out", "discovery_val")  # the partitions audited against the rest
+
 AUDIT_BOUNDARIES = (
     (("discovery_train", "discovery_val"), "held_out"),
     (("discovery_train",), "discovery_val"),
@@ -393,7 +395,8 @@ def assign_partitions(
     only the local-search polish re-balances. The assignment is kept stable between rounds on
     purpose: re-solving from scratch reshuffles every cluster, which creates fresh boundary pairs
     faster than merging removes them (measured: 549 -> 475 -> 174 pairs, not converging). Up to
-    `settings.audit_passes` merge rounds; whatever remains is recorded.
+    `settings.audit_passes` merge rounds, or until every audited partition is within
+    `settings.leak_target`; whatever remains is recorded (and gated by verify_outputs).
 
     `corpus`: uniprot_id, sequence, length, cluster_id. `sites`: uniprot_id, type_pooled,
     crosstalk. Returns (merged cluster id per uniprot_id, partition per cluster id, report)."""
@@ -427,13 +430,28 @@ def assign_partitions(
             audit.append({"pass": attempt, "skipped": True})
             break
 
-        pairs = find_cross_partition_pairs(
-            frame.assign(partition=frame["cluster_id"].map(partition_of_cluster)),
-            identity,
-            tmp_dir,
+        audited = frame.assign(partition=frame["cluster_id"].map(partition_of_cluster))
+        pairs = find_cross_partition_pairs(audited, identity, tmp_dir)
+        partition_of_protein = audited.set_index("uniprot_id")["partition"]
+        leaking_queries = {query for _, query in pairs}
+        audit.append(
+            {
+                "pass": attempt,
+                "cross_partition_pairs": len(pairs),
+                # Proteins of the smaller partition with a homolog across the boundary, and how many
+                # were audited: the fraction is what verify_outputs gates on.
+                "queries": {name: int((partition_of_protein == name).sum()) for name in QUERY_PARTITIONS},
+                "leaks": {
+                    name: int((partition_of_protein.reindex(list(leaking_queries)) == name).sum())
+                    for name in QUERY_PARTITIONS
+                },
+            }
         )
-        audit.append({"pass": attempt, "cross_partition_pairs": len(pairs)})
-        if not pairs or attempt == settings.audit_passes:
+        within_target = all(
+            audit[-1]["leaks"][name] <= settings.leak_target * audit[-1]["queries"][name]
+            for name in QUERY_PARTITIONS
+        )
+        if not pairs or within_target or attempt == settings.audit_passes:
             break
 
         cluster_of, n_merged = merge_leaking_clusters(cluster_of, pairs)

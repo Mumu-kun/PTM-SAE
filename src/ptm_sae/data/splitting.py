@@ -52,7 +52,8 @@ class SplitSettings:
     held_min_sites: int = 200  # V12b's per-type floor in held_out
     val_min_sites: int = 100
     polish_sweeps: int = 60
-    audit_passes: int = 6  # cross-partition homology audit + cluster-merge rounds
+    audit_passes: int = 8  # cross-partition homology audit + cluster-merge rounds
+    leak_target: float = 0.005  # stop merging once every audited partition is at or below this leak fraction
     homology_audit: bool = True  # False only where cd-hit-2d is unavailable (recorded in the manifest)
 
 

@@ -280,3 +280,66 @@ def test_assignment_stays_stable_across_audit_rounds(monkeypatch, make_corpus, s
     for before, after in itertools.pairwise(rounds):
         changed = (before != after.reindex(before.index)).mean()
         assert changed < 0.15, f"{changed:.0%} of proteins changed partition between audit rounds"
+
+
+def test_audit_records_leaks_and_queries_per_boundary(monkeypatch, make_corpus, small_split_settings):
+    proteins, sites = make_corpus(n_clusters=150)
+
+    def one_held_out_leak(frame, identity, tmp_dir):
+        held = frame.loc[frame["partition"] == "held_out", "uniprot_id"].iloc[0]
+        train = frame.loc[frame["partition"] == "discovery_train", "uniprot_id"].iloc[0]
+        return [(train, held)]
+
+    monkeypatch.setattr(clustering, "find_cross_partition_pairs", one_held_out_leak)
+
+    _, _, report = clustering.assign_partitions(
+        proteins, sites, STRATUM_RESIDUES, dataclasses.replace(small_split_settings, audit_passes=0)
+    )
+
+    entry = report["homology_audit"][0]
+    assert entry["leaks"] == {"held_out": 1, "discovery_val": 0}
+    assert entry["queries"]["held_out"] > 100 and entry["queries"]["discovery_val"] > 20
+
+
+def test_merging_stops_early_once_every_partition_is_within_the_leak_target(
+    monkeypatch, make_corpus, small_split_settings
+):
+    proteins, sites = make_corpus(n_clusters=200)
+    calls = []
+
+    def barely_leaky(frame, identity, tmp_dir):
+        calls.append(1)
+        held = frame.loc[frame["partition"] == "held_out", "uniprot_id"].iloc[0]
+        train = frame.loc[frame["partition"] == "discovery_train", "uniprot_id"].iloc[0]
+        return [(train, held)]  # 1 leak among ~400 held-out proteins: 0.25%
+
+    monkeypatch.setattr(clustering, "find_cross_partition_pairs", barely_leaky)
+    settings = dataclasses.replace(small_split_settings, audit_passes=5, leak_target=0.005)
+
+    _, _, report = clustering.assign_partitions(proteins, sites, STRATUM_RESIDUES, settings)
+
+    assert len(calls) == 1  # within target after the first audit: no merge rounds
+    assert report["homology_audit"][0]["cross_partition_pairs"] == 1
+
+
+def test_verify_outputs_gates_on_the_leak_fraction_per_partition(
+    monkeypatch, tmp_path, make_corpus, small_split_settings
+):
+    paths = _finalized_corpus(monkeypatch, tmp_path, make_corpus, small_split_settings)
+    monkeypatch.setattr(pipeline, "MAX_MEAN_DEVIATION", 0.1)
+    monkeypatch.setattr(pipeline, "MAX_FEATURE_DEVIATION", 0.3)
+    manifest = json.loads(paths.split_manifest.read_text())
+
+    def audit(held_leaks, val_leaks):
+        manifest["homology_audit"] = [{
+            "pass": 3, "cross_partition_pairs": held_leaks + val_leaks,
+            "queries": {"held_out": 1000, "discovery_val": 500},
+            "leaks": {"held_out": held_leaks, "discovery_val": val_leaks},
+        }]  # fmt: skip
+        paths.split_manifest.write_text(json.dumps(manifest))
+        return pipeline.verify_outputs(paths)
+
+    assert audit(held_leaks=8, val_leaks=4) == []  # 0.8% and 0.8%: within the 1% tolerance
+    problems = audit(held_leaks=8, val_leaks=9)  # val at 1.8%
+    assert len(problems) == 1 and "discovery_val" in problems[0] and "1.80%" in problems[0]
+    assert any("held_out" in p for p in audit(held_leaks=11, val_leaks=0))

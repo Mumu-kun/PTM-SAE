@@ -22,6 +22,7 @@ def small_split_settings() -> SplitSettings:
         token_tolerance=0.03,
         polish_sweeps=30,
         audit_passes=2,
+        leak_target=0.0,  # tests that want the early stop opt in
     )
 
 
