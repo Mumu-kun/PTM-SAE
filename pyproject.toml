@@ -3,7 +3,7 @@ name = "ptm-sae-engine"
 version = "0.1.0"
 description = "Modular Sparse Autoencoders for PTM Mechanistic Interpretability in Protein Language Models"
 readme = "README.md"
-requires-python = ">=3.11, <3.13"
+requires-python = ">=3.11, <3.14"
 dependencies = [
     "torch>=2.2.0",
     "transformers>=4.40.0",

@@ -94,9 +94,13 @@ def requirement_name(requirement: str) -> str:
 def cloud_requirements(
     root: str | Path | None = None, extras: tuple[str, ...] = ()
 ) -> list[str]:
-    """`project_requirements` minus the packages cloud runtimes pre-install."""
+    """Package NAMES (no version pins) of `project_requirements`, minus what cloud runtimes
+    pre-install. Cloud images carry their own tested numeric stack, and other preinstalled packages
+    constrain it (the Kaggle image wants numpy<2.3 while this project pins numpy>=2.4.6); pip then
+    upgraded numpy underneath the already-running kernel and the next import failed. Bare names let
+    pip add only what is missing and leave the image's versions alone."""
     return [
-        r
+        requirement_name(r)
         for r in project_requirements(root, extras)
         if requirement_name(r).lower() not in CLOUD_PREINSTALLED
     ]

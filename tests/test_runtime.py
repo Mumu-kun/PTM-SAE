@@ -106,8 +106,9 @@ kaggle = ["kaggle>=1.6"]
 
     assert runtime.requirement_name("scipy[extra]>=1.0; python_version>'3'") == "scipy"
     assert runtime.project_requirements(root, ("kaggle",))[-1] == "kaggle>=1.6"
-    assert "torch>=2.2.0" not in runtime.cloud_requirements(root)
-    assert "pydantic>=2.6.0" in runtime.cloud_requirements(root)
+    cloud = runtime.cloud_requirements(root)
+    assert "torch" not in cloud and "torch>=2.2.0" not in cloud  # preinstalled CUDA build is kept
+    assert "pydantic" in cloud and "pydantic>=2.6.0" not in cloud  # bare name: no upgrade of the image's version
     assert runtime.missing_requirements(root) == ["not-a-real-pkg-xyz"]
 
 

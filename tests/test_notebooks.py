@@ -75,3 +75,22 @@ def test_a_failed_clone_cannot_print_the_github_token(name):
 
     assert "capture_output=True" in setup and "from None" in setup
     assert "except subprocess.CalledProcessError" in setup
+
+
+@pytest.mark.parametrize("name", NOTEBOOKS)
+def test_the_final_summary_cell_cannot_be_what_fails_a_run(name):
+    """After an install failure numpy/pandas can be broken, so the last cell must import nothing from
+    the package (observed: it crashed on `from ptm_sae.corpus.config import ...` and ended the run)."""
+    summary = _code_cells(name)[-1]
+
+    assert "state.print_summary(" in summary
+    assert "ptm_sae" not in summary and "import" not in summary
+    assert "try:" in summary and "except Exception" in summary
+
+
+@pytest.mark.parametrize("name", NOTEBOOKS)
+def test_cloud_install_tolerates_a_newer_python_than_pyproject_names(name):
+    """Kaggle's image moved to Python 3.13 while requires-python stopped at 3.12; the editable install must not care."""
+    install = next(src for src in _code_cells(name) if "cloud_requirements" in src)
+
+    assert "--ignore-requires-python" in install
