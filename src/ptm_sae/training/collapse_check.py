@@ -17,20 +17,17 @@ handing off to that full evaluation, along three axes:
     almost as often as on real modifications — a shortcut-learning flag, not real chemistry?
 """
 
-import shutil
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import pyarrow.parquet as pq
 import torch
-from huggingface_hub import hf_hub_download
-from huggingface_hub.errors import HfHubHTTPError
 
 from ptm_sae.corpus.config import CFG
-from ptm_sae.extraction.hub import resolve_hf_token, retry_with_backoff
 from ptm_sae.extraction.reader import SafeTensorsReader
-from ptm_sae.training.dataset import partition_root
+from ptm_sae.training.dataset import hydrate_corpus_file, partition_root
 
 # A latent firing on modified residues at 2x a stratum's own base rate is treated as a
 # candidate non-generic (PTM-associated) feature worth flagging — a heuristic canary
@@ -54,53 +51,6 @@ class ResidueLabel:
 StratumLabels = dict[str, dict[int, ResidueLabel]]
 
 
-def _hydrate_corpus_parquet(
-    filename: str,
-    corpus_dir: Path,
-    remote_corpus_repo_id: str | None,
-    remote_corpus_subpath: str,
-    token: str | None,
-    required: bool,
-) -> Path | None:
-    """Ensures `filename` is cached locally under `corpus_dir`, hydrating it once from the
-    Remote Storage Authority (`<remote_corpus_subpath>/<filename>`) if absent. Mirrors
-    `training.dataset.load_partition_ids`'s local-cache-then-remote-hydrate pattern. Optional
-    artifacts (`required=False`) that genuinely don't exist yet upstream (a real corpus build
-    hasn't run yet) resolve to `None` instead of raising.
-    """
-    local_path = corpus_dir / filename
-
-    if not local_path.exists() and remote_corpus_repo_id:
-        resolved_token = resolve_hf_token(token)
-        remote_path = f"{remote_corpus_subpath.rstrip('/')}/{filename}"
-
-        def _download() -> str:
-            return hf_hub_download(
-                repo_id=remote_corpus_repo_id,
-                filename=remote_path,
-                repo_type="dataset",
-                token=resolved_token,
-            )
-
-        try:
-            cached_file = retry_with_backoff(_download, max_retries=3, base_delay=2.0)
-        except HfHubHTTPError:
-            if required:
-                raise
-            return None
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(cached_file, local_path)
-
-    if not local_path.exists():
-        if not required:
-            return None
-        raise FileNotFoundError(
-            f"{filename} not found locally at {local_path} or on remote repository "
-            f"{remote_corpus_repo_id}."
-        )
-    return local_path
-
-
 def load_discovery_val_labels(
     corpus_dir: str | Path,
     remote_corpus_repo_id: str | None = None,
@@ -116,43 +66,21 @@ def load_discovery_val_labels(
     (`exclusion_mask.parquet`, optional) becomes a negative, tiered `gold` (explicitly verified
     unmodified, `gold_negatives_nglyco.parquet`, optional and currently N-glycosylation-only),
     `hard` (the protein has >=1 positive site of that stratum elsewhere), or `background`
-    (otherwise). Mirrors `training.dataset.load_partition_ids`'s local-cache-then-remote-hydrate
-    pattern, one artifact at a time.
+    (otherwise). Each artifact is hydrated one at a time by `training.dataset.hydrate_corpus_file`.
     """
     corpus_dir = Path(corpus_dir)
 
-    corpus_path = _hydrate_corpus_parquet(
-        "corpus.parquet",
-        corpus_dir,
-        remote_corpus_repo_id,
-        remote_corpus_subpath,
-        token,
-        required=True,
+    hydrate = partial(
+        hydrate_corpus_file,
+        corpus_dir=corpus_dir,
+        remote_corpus_repo_id=remote_corpus_repo_id,
+        remote_corpus_subpath=remote_corpus_subpath,
+        token=token,
     )
-    labels_path = _hydrate_corpus_parquet(
-        "labels_stratified.parquet",
-        corpus_dir,
-        remote_corpus_repo_id,
-        remote_corpus_subpath,
-        token,
-        required=True,
-    )
-    exclusion_path = _hydrate_corpus_parquet(
-        "exclusion_mask.parquet",
-        corpus_dir,
-        remote_corpus_repo_id,
-        remote_corpus_subpath,
-        token,
-        required=False,
-    )
-    gold_path = _hydrate_corpus_parquet(
-        "gold_negatives_nglyco.parquet",
-        corpus_dir,
-        remote_corpus_repo_id,
-        remote_corpus_subpath,
-        token,
-        required=False,
-    )
+    corpus_path = hydrate("corpus.parquet")
+    labels_path = hydrate("labels_stratified.parquet")
+    exclusion_path = hydrate("exclusion_mask.parquet", required=False)
+    gold_path = hydrate("gold_negatives_nglyco.parquet", required=False)
 
     corpus_rows = pq.read_table(
         corpus_path, columns=["uniprot_id", "sequence", "partition"]

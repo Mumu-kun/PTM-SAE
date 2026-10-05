@@ -7,16 +7,13 @@ detector (Residue Collapse) rather than tracking anything more specific. Unlike
 from `corpus.parquet`'s sequences — so it's cheaper and carries no held_out risk by construction.
 """
 
-import shutil
 from pathlib import Path
 
 import pyarrow.parquet as pq
 import torch
-from huggingface_hub import hf_hub_download
 
-from ptm_sae.extraction.hub import resolve_hf_token, retry_with_backoff
 from ptm_sae.extraction.reader import SafeTensorsReader
-from ptm_sae.training.dataset import partition_root
+from ptm_sae.training.dataset import hydrate_corpus_file, partition_root
 
 # Standard 20 amino acids; anything else (rare/ambiguous codes) falls into one shared "unknown"
 # bucket rather than growing the vocabulary per oddity in the sequence data.
@@ -32,33 +29,11 @@ def load_discovery_val_sequences(
     remote_corpus_subpath: str = "corpus",
     token: str | None = None,
 ) -> dict[str, str]:
-    """Loads `corpus.parquet`, filtered to `discovery_val`, keyed by `uniprot_id -> sequence`.
-    Mirrors `training.dataset.load_partition_ids`'s local-cache-then-remote-hydrate pattern."""
-    local_path = Path(corpus_dir) / "corpus.parquet"
-
-    if not local_path.exists() and remote_corpus_repo_id:
-        resolved_token = resolve_hf_token(token)
-        remote_path = f"{remote_corpus_subpath.rstrip('/')}/corpus.parquet"
-
-        def _download() -> str:
-            return hf_hub_download(
-                repo_id=remote_corpus_repo_id,
-                filename=remote_path,
-                repo_type="dataset",
-                token=resolved_token,
-            )
-
-        cached_file = retry_with_backoff(_download, max_retries=3, base_delay=2.0)
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(cached_file, local_path)
-
-    if not local_path.exists():
-        raise FileNotFoundError(
-            f"corpus.parquet not found locally at {local_path} or on remote repository "
-            f"{remote_corpus_repo_id}."
-        )
-
-    table = pq.read_table(local_path, columns=["uniprot_id", "sequence", "partition"])
+    """Loads `corpus.parquet`, filtered to `discovery_val`, keyed by `uniprot_id -> sequence`."""
+    corpus_path = hydrate_corpus_file(
+        "corpus.parquet", corpus_dir, remote_corpus_repo_id, remote_corpus_subpath, token
+    )
+    table = pq.read_table(corpus_path, columns=["uniprot_id", "sequence", "partition"])
     return {
         record["uniprot_id"]: record["sequence"]
         for record in table.to_pylist()

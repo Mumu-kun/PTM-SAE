@@ -12,6 +12,7 @@ from typing import Literal
 import pyarrow.parquet as pq
 import torch
 from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import HfHubHTTPError
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from ptm_sae.extraction.hub import resolve_hf_token, retry_with_backoff
@@ -49,23 +50,23 @@ def partition_root(
     return Path(cache_dir) / partition, remote
 
 
-def load_partition_ids(
-    partition: Partition,
-    corpus_dir: str | Path = "data/processed",
+def hydrate_corpus_file(
+    filename: str,
+    corpus_dir: str | Path,
     remote_corpus_repo_id: str | None = None,
     remote_corpus_subpath: str = "corpus",
     token: str | None = None,
-) -> set[str]:
-    """Resolves the set of UniProt IDs assigned to the given Corpus Partition.
-
-    Reads the local corpus.parquet if cached, otherwise hydrates it once from the
-    Remote Storage Authority (`<remote_corpus_subpath>/corpus.parquet`).
-    """
-    local_path = Path(corpus_dir) / "corpus.parquet"
+    required: bool = True,
+) -> Path | None:
+    """Ensures `filename` is cached locally under `corpus_dir`, hydrating it once from the
+    Remote Storage Authority (`<remote_corpus_subpath>/<filename>`) if absent. Optional artifacts
+    (`required=False`) that genuinely don't exist yet upstream (a real corpus build hasn't run
+    yet) resolve to `None` instead of raising."""
+    local_path = Path(corpus_dir) / filename
 
     if not local_path.exists() and remote_corpus_repo_id:
         resolved_token = resolve_hf_token(token)
-        remote_path = f"{remote_corpus_subpath.rstrip('/')}/corpus.parquet"
+        remote_path = f"{remote_corpus_subpath.rstrip('/')}/{filename}"
 
         def _download() -> str:
             return hf_hub_download(
@@ -75,16 +76,38 @@ def load_partition_ids(
                 token=resolved_token,
             )
 
-        cached_file = retry_with_backoff(_download, max_retries=3, base_delay=2.0)
+        try:
+            cached_file = retry_with_backoff(_download, max_retries=3, base_delay=2.0)
+        except HfHubHTTPError:
+            if required:
+                raise
+            return None
         local_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(cached_file, local_path)
 
     if not local_path.exists():
+        if not required:
+            return None
         raise FileNotFoundError(
-            f"corpus.parquet not found locally at {local_path} or on remote repository {remote_corpus_repo_id}."
+            f"{filename} not found locally at {local_path} or on remote repository "
+            f"{remote_corpus_repo_id}."
         )
+    return local_path
 
-    table = pq.read_table(local_path, columns=["uniprot_id", "partition"])
+
+def load_partition_ids(
+    partition: Partition,
+    corpus_dir: str | Path = "data/processed",
+    remote_corpus_repo_id: str | None = None,
+    remote_corpus_subpath: str = "corpus",
+    token: str | None = None,
+) -> set[str]:
+    """Resolves the set of UniProt IDs assigned to the given Corpus Partition, reading the local
+    corpus.parquet (hydrated once from the Remote Storage Authority if absent)."""
+    corpus_path = hydrate_corpus_file(
+        "corpus.parquet", corpus_dir, remote_corpus_repo_id, remote_corpus_subpath, token
+    )
+    table = pq.read_table(corpus_path, columns=["uniprot_id", "partition"])
     return {
         record["uniprot_id"]
         for record in table.to_pylist()
@@ -117,15 +140,13 @@ class ActivationPartitionDataset(IterableDataset):
         shuffle_buffer_size: int = 65536,
         seed: int = 0,
         dtype: torch.dtype | None = torch.float32,
-        partition_folders: bool = False,
+        partition_folders: bool = True,
     ):
         self.partition = partition
-        cache_dir, remote_subpath = partition_root(
+        self.cache_dir, self.remote_subpath = partition_root(
             cache_dir, remote_subpath, partition, partition_folders
         )
-        self.cache_dir = cache_dir
         self.remote_repo_id = remote_repo_id
-        self.remote_subpath = remote_subpath
         self.max_cached_shards = max_cached_shards
         self.token = token
         self.shuffle = shuffle
@@ -144,9 +165,9 @@ class ActivationPartitionDataset(IterableDataset):
 
         # Cross-reference shard manifest entries against the partition's IDs once, up front.
         probe_reader = SafeTensorsReader(
-            cache_dir=cache_dir,
+            cache_dir=self.cache_dir,
             remote_repo_id=remote_repo_id,
-            remote_subpath=remote_subpath,
+            remote_subpath=self.remote_subpath,
             max_cached_shards=max_cached_shards,
             token=token,
         )
@@ -166,7 +187,7 @@ class ActivationPartitionDataset(IterableDataset):
             current = corpus_fingerprint(Path(corpus_dir) / "corpus.parquet")
             if current != manifest_fingerprint:
                 raise ValueError(
-                    f"Activations in {cache_dir} were extracted from a different corpus "
+                    f"Activations in {self.cache_dir} were extracted from a different corpus "
                     f"({manifest_fingerprint[:12]}...) than {Path(corpus_dir) / 'corpus.parquet'} "
                     f"({current[:12]}...). Re-extract against the current corpus."
                 )
@@ -174,7 +195,7 @@ class ActivationPartitionDataset(IterableDataset):
         if covered < len(partition_ids):
             warnings.warn(
                 f"Only {covered}/{len(partition_ids)} {partition} proteins "
-                f"({covered / len(partition_ids):.1%}) have activations in {cache_dir}"
+                f"({covered / len(partition_ids):.1%}) have activations in {self.cache_dir}"
                 + ("" if manifest_fingerprint else " (manifest predates corpus stamping)")
                 + ".",
                 stacklevel=2,
@@ -266,7 +287,7 @@ def build_partition_dataloader(
     shuffle_buffer_size: int = 65536,
     seed: int = 0,
     dtype: torch.dtype | None = torch.float32,
-    partition_folders: bool = False,
+    partition_folders: bool = True,
 ) -> tuple[ActivationPartitionDataset, DataLoader]:
     """Convenience builder wiring an ActivationPartitionDataset into a torch DataLoader.
 

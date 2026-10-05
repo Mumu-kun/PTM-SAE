@@ -18,6 +18,7 @@ from ptm_sae.training.dataset import (
 )
 
 HIDDEN_DIM = 4
+MIXED = {"partition_folders": False}  # these fixtures write one mixed-layout shard set
 
 
 def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
@@ -111,7 +112,7 @@ def test_dataset_excludes_discovery_val_and_held_out(tmp_path):
     data."""
     cache_dir, corpus_dir = _write_fixture(tmp_path)
     dataset = ActivationPartitionDataset(
-        "discovery_train", cache_dir=cache_dir, corpus_dir=corpus_dir, shuffle=False
+        "discovery_train", cache_dir=cache_dir, corpus_dir=corpus_dir, **MIXED, shuffle=False
     )
 
     assert dataset.total_tokens == 7
@@ -131,7 +132,7 @@ def test_dataset_discovery_val_partition(tmp_path):
     """Verify a discovery_val dataset streams strictly proteinB's rows."""
     cache_dir, corpus_dir = _write_fixture(tmp_path)
     dataset = ActivationPartitionDataset(
-        "discovery_val", cache_dir=cache_dir, corpus_dir=corpus_dir, shuffle=False
+        "discovery_val", cache_dir=cache_dir, corpus_dir=corpus_dir, **MIXED, shuffle=False
     )
 
     assert dataset.total_tokens == 2
@@ -146,7 +147,7 @@ def test_dataset_shuffle_preserves_multiset(tmp_path):
     dataset = ActivationPartitionDataset(
         "discovery_train",
         cache_dir=cache_dir,
-        corpus_dir=corpus_dir,
+        corpus_dir=corpus_dir, **MIXED,
         shuffle=True,
         shuffle_buffer_size=2,
         seed=42,
@@ -164,7 +165,7 @@ def test_dataset_epoch_reseeds_shard_order(tmp_path):
     dataset = ActivationPartitionDataset(
         "discovery_train",
         cache_dir=cache_dir,
-        corpus_dir=corpus_dir,
+        corpus_dir=corpus_dir, **MIXED,
         shuffle=True,
         shuffle_buffer_size=8,
         seed=0,
@@ -187,7 +188,7 @@ def test_build_partition_dataloader_batches(tmp_path):
         "discovery_train",
         batch_size=4,
         cache_dir=cache_dir,
-        corpus_dir=corpus_dir,
+        corpus_dir=corpus_dir, **MIXED,
         shuffle=False,
     )
 
@@ -231,7 +232,7 @@ def test_dataset_rejects_activations_from_a_different_corpus(tmp_path):
     _stamp_manifest(cache_dir, "0" * 64)
 
     with pytest.raises(ValueError, match="different corpus"):
-        ActivationPartitionDataset("discovery_train", cache_dir, corpus_dir=corpus_dir)
+        ActivationPartitionDataset("discovery_train", cache_dir, corpus_dir=corpus_dir, **MIXED)
 
 
 def test_dataset_accepts_matching_corpus_stamp(tmp_path):
@@ -241,7 +242,7 @@ def test_dataset_accepts_matching_corpus_stamp(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         dataset = ActivationPartitionDataset(
-            "discovery_train", cache_dir, corpus_dir=corpus_dir
+            "discovery_train", cache_dir, corpus_dir=corpus_dir, **MIXED
         )
     assert dataset.total_tokens == 7
 
@@ -254,7 +255,7 @@ def test_dataset_warns_on_partial_coverage_of_legacy_manifest(tmp_path):
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.warns(UserWarning, match=r"1/2 discovery_train.*predates corpus stamping"):
-        ActivationPartitionDataset("discovery_train", cache_dir, corpus_dir=corpus_dir)
+        ActivationPartitionDataset("discovery_train", cache_dir, corpus_dir=corpus_dir, **MIXED)
 
 
 

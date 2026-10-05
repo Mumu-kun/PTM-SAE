@@ -32,7 +32,11 @@ from ptm_sae.extraction.hub import publish_kaggle_dataset, resolve_hf_token
 from ptm_sae.extraction.pipeline import run_extraction_pipeline
 from ptm_sae.extraction.progress import PipelineProgressManager
 from ptm_sae.extraction.reader import SafeTensorsReader
-from ptm_sae.training.dataset import corpus_fingerprint, load_partition_ids
+from ptm_sae.training.dataset import (
+    corpus_fingerprint,
+    load_partition_ids,
+    partition_root,
+)
 
 DEFAULT_CORPUS_REPO_ID = "mustafa-muhaimin/ptm-sae-corpus"
 
@@ -176,11 +180,14 @@ def run_full_lifecycle(
     for protein in target_proteins:
         by_partition.setdefault(protein.partition, []).append(protein)
 
-    sharding_manifests = {}
+    sharding_manifests: dict[str, dict] = {}
+    partition_roots: dict[str, tuple[Path, str | None]] = {}
     for partition, partition_proteins in by_partition.items():
+        local_root, remote_root = partition_root(config.sharding.output_dir, resolved_subpath, partition, True)
+        partition_roots[partition] = (local_root, remote_root)
         partition_config = config.model_copy(deep=True)
-        partition_config.sharding.output_dir = f"{config.sharding.output_dir}/{partition}"
-        partition_config.sharding.remote_subpath = f"{resolved_subpath}/{partition}"
+        partition_config.sharding.output_dir = str(local_root)
+        partition_config.sharding.remote_subpath = remote_root
         sharding_manifests[partition] = run_extraction_pipeline(
             config=partition_config,
             proteins=partition_proteins,
@@ -228,18 +235,20 @@ def run_full_lifecycle(
     # 5. Zero-copy readback sanity verification
     pm.start_stage(5, total_items=1, info="Zero-copy readback sanity check")
 
+    # Every manifest is counted; one protein is actually read back (a freed shard is re-fetched from the
+    # Hub, which also proves the upload), so the probe stops after the first partition that has any.
     indexed = 0
-    probe_summary = "No proteins available"
-    for partition in by_partition:
+    probe_summary = None
+    for partition, (local_root, remote_root) in partition_roots.items():
         reader = SafeTensorsReader(
-            cache_dir=f"{config.sharding.output_dir}/{partition}",
+            cache_dir=local_root,
             remote_repo_id=resolved_repo,
-            remote_subpath=f"{resolved_subpath}/{partition}",
+            remote_subpath=remote_root,
             token=resolved_token,
         )
         available_proteins = reader.list_proteins()
         indexed += len(available_proteins)
-        if available_proteins:
+        if available_proteins and probe_summary is None:
             probe_id = available_proteins[0]
             acts = reader.get_protein_activations(probe_id)
             _res_1 = reader.get_residue_activation(probe_id, 1)
@@ -248,7 +257,7 @@ def run_full_lifecycle(
 
     pm.finish_stage(
         5,
-        summary=f"{indexed} proteins indexed across {len(by_partition)} partition manifest(s) | {probe_summary}",
+        summary=f"{indexed} proteins indexed across {len(partition_roots)} partition manifest(s) | {probe_summary or 'No proteins available'}",
     )
 
     pm.print("\n" + "═" * 72)
