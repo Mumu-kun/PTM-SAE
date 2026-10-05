@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -71,3 +72,12 @@ def test_inject_mode_rejects_a_parameter_the_notebook_does_not_have(kaggle_run):
 
     with pytest.raises(ValueError, match="PTM_SAE_NOPE"):
         kaggle_run.inject_mode(notebook, "real", params={"PTM_SAE_NOPE": "1"})
+
+
+def test_default_output_pattern_takes_result_files_and_skips_checkpoints_and_the_data_cache(kaggle_run):
+    pattern = re.compile(kaggle_run.RESULT_FILES)
+    wanted = ["sweeps/topk_lr_probe/run_state.json", "sweeps/w4096_lr4e-4/metrics.jsonl", "logs/sweep.log", "benchmark.json", "sweeps/bench_c1/state.json"]
+    skipped = ["sweeps/w4096_lr4e-4/latest/resume_state.pt", "sweeps/w4096_lr4e-4/best/model.safetensors", "cache/shards/shard_000.safetensors", "sweeps/w4096_lr4e-4/best/config.json"]
+
+    assert all(pattern.search(path) for path in wanted)
+    assert not any(pattern.search(path) for path in skipped)

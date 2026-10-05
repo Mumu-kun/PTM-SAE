@@ -19,6 +19,8 @@ import re
 import tempfile
 from pathlib import Path
 
+RESULT_FILES = r"(state\.json|benchmark\.json|metrics\.jsonl|\.log)$"  # what analysis reads; checkpoints and the data cache are GBs
+
 
 def _set_default(cells: list[dict], name: str, value: str) -> int:
     """Rewrites the default of every `os.environ.get("NAME", "...")` in `cells`; returns how many it changed."""
@@ -89,6 +91,7 @@ def main() -> None:
         cmd = sub.add_parser(name)
         cmd.add_argument("--slug", required=True)
     sub.choices["output"].add_argument("--out", type=Path, required=True)
+    sub.choices["output"].add_argument("--file-pattern", default=RESULT_FILES, help='regex on file paths; the default skips checkpoints and the data cache (GBs), use ".*" for everything')
     args = parser.parse_args()
 
     api, username = _api()
@@ -109,7 +112,11 @@ def main() -> None:
         print(f"{kernel}: {status.status} {getattr(status, 'failure_message', None) or ''}")
     else:
         args.out.mkdir(parents=True, exist_ok=True)
-        api.kernels_output(kernel, path=str(args.out))
+        page_token = None
+        while True:
+            _, page_token = api.kernels_output(kernel, path=str(args.out), file_pattern=args.file_pattern, page_size=200, page_token=page_token)
+            if not page_token:
+                break
         files = sorted(p for p in args.out.rglob("*") if p.is_file())
         print(f"downloaded {len(files)} files to {args.out}")
         for path in files[:40]:
