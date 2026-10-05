@@ -1,0 +1,22 @@
+# Stage 0 of the TopK sweep (rationale and the stages that follow: docs/research/topk-sweep-design.md).
+# A learning-rate range test, NOT a result: short runs (3,000 steps) at k=32 to find the stable ceiling and
+# the best short-budget learning rate for each dictionary width. Collapse canaries are off to keep it cheap.
+# Width 4096 spans 1e-4 (the OpenAI reference default) up to 16x that; 10240 needs less (the largest
+# convergent rate falls with 1/sqrt(width), Gao et al. 2024, Fig. 3).
+# Run on Kaggle via notebooks/train_sae.ipynb (PTM_SAE_SWEEP_SPEC=sweeps/topk_lr_probe.yaml) or anywhere with:
+#   uv run python -m ptm_sae.training.sweep --spec sweeps/topk_lr_probe.yaml
+
+base_config: configs/train_topk_baseline.yaml
+group: topk_lr_probe
+tags: [ablation-phase2, lr-probe]
+
+runs:
+  - {name: w4096_lr1e-4,  set: {d_hidden: 4096,  k: 32, learning_rate: 0.0001,  total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w4096_lr2e-4,  set: {d_hidden: 4096,  k: 32, learning_rate: 0.0002,  total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w4096_lr4e-4,  set: {d_hidden: 4096,  k: 32, learning_rate: 0.0004,  total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w4096_lr8e-4,  set: {d_hidden: 4096,  k: 32, learning_rate: 0.0008,  total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w4096_lr16e-4, set: {d_hidden: 4096,  k: 32, learning_rate: 0.0016,  total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w10240_lr1e-4, set: {d_hidden: 10240, k: 32, learning_rate: 0.0001,  total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w10240_lr2e-4, set: {d_hidden: 10240, k: 32, learning_rate: 0.0002,  total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w10240_lr4e-4, set: {d_hidden: 10240, k: 32, learning_rate: 0.0004,  total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}
+  - {name: w10240_lr8e-4, set: {d_hidden: 10240, k: 32, learning_rate: 0.0008,  total_steps: 3000, eval_interval_steps: 500, enable_collapse_check: false, enable_residue_dominance_check: false}}

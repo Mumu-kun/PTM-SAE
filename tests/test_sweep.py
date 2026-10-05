@@ -23,10 +23,15 @@ name = ckpt.name
 trace = ckpt.parent / f"trace-{name}.jsonl"  # one file per run: concurrent appends to a shared file lose lines
 with open(trace, "a") as f:
     f.write(json.dumps({"name": name, "event": "start", "t": time.time(), "gpu": os.environ.get("CUDA_VISIBLE_DEVICES")}) + "\\n")
+ckpt.mkdir(parents=True, exist_ok=True)
+metrics = ckpt / "metrics.jsonl"  # what the real trainer writes next to its checkpoints
+with open(metrics, "a") as f:
+    f.write(json.dumps({"step": 50, "train/tokens_per_sec": 1234.0}) + "\\n")
 print("1234 tok/s  ETA 1s", flush=True)
 time.sleep(float(os.environ.get("FAKE_SECONDS", "0.4")))
-print("val_mse=0.5000  explained_variance=61.5%", flush=True)
-print("mean_l0=16.0  dead_latent_fraction=2.5%", flush=True)
+with open(metrics, "a") as f:
+    f.write(json.dumps({"step": 500, "val/mse": 0.5, "val/explained_variance": 0.615, "val/never_fired_fraction": 0.025}) + "\\n")
+    f.write('{"step": 501, "val/mse"')  # a row cut off mid-write must be ignored, not crash the table
 if "fail" in name:
     sys.exit(3)
 (ckpt / "best").mkdir(parents=True, exist_ok=True)
@@ -131,7 +136,7 @@ def test_a_failing_run_is_recorded_and_does_not_stop_the_others(fake_trainer, tm
     assert {n: i["status"] for n, i in state.runs.items()} == {"good1": "ok", "fail_me": "failed", "good2": "ok"}
     assert state.runs["fail_me"]["returncode"] == 3
     table = capsys.readouterr().out
-    assert "fail_me" in table and "0.5000" in table  # metrics parsed from the logs
+    assert "fail_me" in table and "0.5000" in table and "61.5" in table  # latest metrics read from metrics.jsonl
 
 
 def test_relaunch_skips_finished_runs_and_retries_failed_ones(fake_trainer, tmp_path):
@@ -212,16 +217,19 @@ def test_launcher_overrides_round_trip_through_the_real_training_config(tmp_path
     assert config.wandb.tags == ["ablation", "sweep", "g"]
 
 
-def test_topk_sweep_spec_is_six_distinct_topk_runs():
-    spec = yaml.safe_load(Path("sweeps/topk_sweep.yaml").read_text(encoding="utf-8"))
+def test_lr_probe_spec_is_a_short_learning_rate_range_test_at_both_widths():
+    """Stage 0 of the TopK sweep design (docs/research/topk-sweep-design.md): one k, short runs, no canaries,
+    a learning-rate ladder per width."""
+    spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "sweeps" / "topk_lr_probe.yaml").read_text(encoding="utf-8"))
 
     runs = sweep.expand_runs(spec)
 
-    assert len(runs) == 6
-    assert {(r.overrides["k"], r.overrides["learning_rate"]) for r in runs} == {
-        (k, lr) for k in (16, 32, 64) for lr in (0.0004, 0.001)
-    }
     assert spec["base_config"] == "configs/train_topk_baseline.yaml"
+    assert {(r.overrides["d_hidden"], r.overrides["learning_rate"]) for r in runs} == {
+        (4096, lr) for lr in (0.0001, 0.0002, 0.0004, 0.0008, 0.0016)
+    } | {(10240, lr) for lr in (0.0001, 0.0002, 0.0004, 0.0008)}
+    assert {r.overrides["k"] for r in runs} == {32}
+    assert all(r.overrides["total_steps"] == 3000 and not r.overrides["enable_collapse_check"] for r in runs)
 
 
 def test_pick_parallel_takes_the_smallest_level_within_five_percent_of_the_best():
@@ -250,3 +258,21 @@ def test_benchmark_cli_writes_results_and_the_chosen_concurrency(fake_trainer, t
     written = json.loads(out.read_text(encoding="utf-8"))
     assert [r["concurrent"] for r in written["results"]] == [1, 2]
     assert written["chosen"] == 2  # the fake trainer scales linearly with concurrency
+
+
+SWEEPS = Path(__file__).resolve().parents[1] / "sweeps"
+
+
+@pytest.mark.parametrize("spec_path", sorted(SWEEPS.glob("*.yaml")), ids=lambda p: p.name)
+def test_every_shipped_sweep_spec_expands_and_applies_to_its_base_config(spec_path):
+    """A typo in a spec (unknown key, wrong type, duplicate run name) must fail here, not on a Kaggle GPU."""
+    from ptm_sae.training.config import SAETrainingConfig
+
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    base = SAETrainingConfig.from_yaml(SWEEPS.parent / spec["base_config"])
+
+    runs = sweep.expand_runs(spec)
+
+    assert runs
+    for run in runs:
+        base.with_overrides([f"{key}={value}" for key, value in run.overrides.items()])

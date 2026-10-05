@@ -28,9 +28,6 @@ import yaml
 from ptm_sae import runtime
 from ptm_sae.runtime import resolve_data_root
 
-THROUGHPUT = re.compile(r"([\d,]+) tok/s")
-VAL_LINE = re.compile(r"val_mse=([\d.eE+-]+)\s+explained_variance=([\d.]+)%")
-DEAD_LINE = re.compile(r"dead_latent_fraction=([\d.]+)%")
 UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._=-]+")
 
 
@@ -100,29 +97,31 @@ class SweepState:
         return self.runs.get(name, {}).get("status") == "ok" and (sweep_dir / name / "best").exists()
 
 
-def parse_log(log_path: Path) -> dict:
-    """Last validation metrics and recent throughput from a run's log (None where not yet logged)."""
-    text = log_path.read_text(errors="replace") if log_path.exists() else ""
-    text = text.replace("\r", "\n")
-    val, dead, tput = VAL_LINE.findall(text), DEAD_LINE.findall(text), THROUGHPUT.findall(text)
-    recent = [float(t.replace(",", "")) for t in tput[-3:]]
-    return {
-        "val_mse": float(val[-1][0]) if val else None,
-        "explained_variance_pct": float(val[-1][1]) if val else None,
-        "dead_latent_pct": float(dead[-1]) if dead else None,
-        "tokens_per_sec": sum(recent) / len(recent) if recent else None,
-    }
+def run_metrics(run_dir: Path) -> dict:
+    """The latest value of every metric a run logged, from its metrics.jsonl (one row per log event). Unlike the
+    console text this cannot misread a number, and a run that died early shows what it last logged."""
+    latest: dict = {}
+    path = run_dir / "metrics.jsonl"
+    for line in path.read_text(errors="replace").splitlines() if path.exists() else []:
+        try:
+            latest.update(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # a row being written while we read
+    return latest
 
 
 def format_table(state: SweepState, sweep_dir: Path) -> str:
     cell = lambda v, fmt: "-" if v is None else format(v, fmt)  # noqa: E731
-    lines = [f"{'run':36s} {'status':9s} {'sec':>6s} {'val_mse':>9s} {'EV%':>6s} {'dead%':>6s} {'tok/s':>8s}"]
+    pct = lambda v: None if v is None else 100 * v  # noqa: E731
+    lines = [f"{'run':36s} {'status':9s} {'sec':>6s} {'val_mse':>9s} {'EV%':>6s} {'never%':>7s} {'collapse%':>9s} {'c_dec':>7s} {'tok/s':>8s}"]
     for name, info in state.runs.items():
-        m = parse_log(sweep_dir / f"{name}.log")
+        m = run_metrics(sweep_dir / name)
         lines.append(
             f"{name:36s} {info.get('status', '?'):9s} {cell(info.get('seconds'), '6.0f'):>6s} "
-            f"{cell(m['val_mse'], '9.4f'):>9s} {cell(m['explained_variance_pct'], '6.1f'):>6s} "
-            f"{cell(m['dead_latent_pct'], '6.1f'):>6s} {cell(m['tokens_per_sec'], '8.0f'):>8s}"
+            f"{cell(m.get('val/mse'), '9.4f'):>9s} {cell(pct(m.get('val/explained_variance')), '6.1f'):>6s} "
+            f"{cell(pct(m.get('val/never_fired_fraction')), '7.1f'):>7s} "
+            f"{cell(pct(m.get('residue_dominance/collapse_rate_alive')), '9.1f'):>9s} "
+            f"{cell(m.get('val/decoder_pairwise_cosine'), '7.4f'):>7s} {cell(m.get('train/tokens_per_sec'), '8.0f'):>8s}"
         )
     return "\n".join(lines)
 
@@ -221,7 +220,7 @@ def benchmark_concurrency(
         sweep_dir = Path(data_root or resolve_data_root()) / "sweeps" / spec["group"]
         shutil.rmtree(sweep_dir, ignore_errors=True)  # every level starts from scratch
         state = launch(spec, data_root=data_root, max_parallel=level, devices=devices)
-        per_run = [parse_log(sweep_dir / f"{name}.log")["tokens_per_sec"] for name in state.runs]
+        per_run = [run_metrics(sweep_dir / name).get("train/tokens_per_sec") for name in state.runs]
         ok = [t for t in per_run if t]
         results.append({"concurrent": level, "ok_runs": len(ok), "per_run_tok_s": sum(ok) / len(ok) if ok else None, "aggregate_tok_s": sum(ok)})
     base = results[0]["aggregate_tok_s"] or 1
