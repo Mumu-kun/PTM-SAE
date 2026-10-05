@@ -61,7 +61,7 @@ class JumpReLUSAEConfig(SAEConfig):
         super().__init__(d_in=d_in, d_hidden=d_hidden, **kwargs)
 
 
-class BatchTopKSAEConfig(SAEConfig):
+class BatchTopKSAEConfig(TopKSAEConfig):
     """Configuration for BatchTopK: a per-batch (not per-residue) sparsity budget, letting
     complex residues borrow more latents than simple ones (Bussmann, 2024)."""
 
@@ -72,18 +72,17 @@ class BatchTopKSAEConfig(SAEConfig):
         d_in: int = 1280,
         d_hidden: int = 4096,
         k: int = 32,
+        # AuxK is on by default here, matching BatchTopK's own published recipe (unlike plain
+        # TopK, where it's an opt-in ablation).
         auxk_coefficient: float = 1.0 / 32.0,
         k_aux: int | None = None,
         threshold_ema_decay: float = 0.99,
         **kwargs,
     ):
-        self.k = k
-        # AuxK is on by default here, matching BatchTopK's own published recipe (unlike plain
-        # TopK, where it's an opt-in ablation).
-        self.auxk_coefficient = auxk_coefficient
-        self.k_aux = k_aux
         self.threshold_ema_decay = threshold_ema_decay
-        super().__init__(d_in=d_in, d_hidden=d_hidden, **kwargs)
+        super().__init__(
+            d_in=d_in, d_hidden=d_hidden, k=k, auxk_coefficient=auxk_coefficient, k_aux=k_aux, **kwargs
+        )
 
 
 class GatedSAEConfig(SAEConfig):

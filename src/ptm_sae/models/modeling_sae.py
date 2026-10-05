@@ -11,9 +11,9 @@ the model: every `forward()` returns raw, unweighted components.
 
 `SAEPreTrainedModel` is intentionally minimal — it owns only the decoder (`W_dec`, `b_dec`)
 and the utilities that operate purely on it. Each concrete model defines its own encoder shape
-directly, rather than sharing an intermediate tier: TopK/JumpReLU/BatchTopK all happen to use
-an identical single dense encoder matrix (a few duplicated lines each), while Gated SAE's
-two-path encoder never fit that shape at all.
+directly, rather than sharing an intermediate tier: TopK and JumpReLU each define their single
+dense encoder matrix (a couple of lines), BatchTopK is a TopK with a different `encode`, and Gated
+SAE's two-path encoder never fit that shape at all.
 """
 
 import math
@@ -216,11 +216,14 @@ class TopKSAEModel(SAEPreTrainedModel):
         )
 
 
-class BatchTopKSAEModel(SAEPreTrainedModel):
+class BatchTopKSAEModel(TopKSAEModel):
     """BatchTopK: relaxes TopK's fixed per-residue k to a per-batch budget (Bussmann, 2024) —
     some residues borrow more latents than others within a batch, while the batch average
     matches k. Falls back to a running-average threshold (tracked only during training) at
     eval time, since there's no batch to pool over for a single-example inference call.
+
+    Shares everything but `encode` with TopK: the encoder weights, k/k_aux validation, and the
+    whole `forward` (including AuxK) are inherited.
     """
 
     config_class = BatchTopKSAEConfig
@@ -229,26 +232,13 @@ class BatchTopKSAEModel(SAEPreTrainedModel):
 
     def __init__(self, config: BatchTopKSAEConfig):
         super().__init__(config)
-        if not 0 < config.k <= config.d_hidden:
-            raise ValueError(f"k ({config.k}) must be in (0, d_hidden={config.d_hidden}]")
-        self.k = config.k
-        self.k_aux = (
-            config.k_aux if config.k_aux is not None else _nearest_power_of_two(config.d_in // 2)
-        )
         self.threshold_ema_decay = config.threshold_ema_decay
-
-        self.b_enc = nn.Parameter(torch.zeros(config.d_hidden))
-        self.W_enc = nn.Parameter(self.W_dec.t().clone())
 
         # Running estimate of theta = E_X[min positive activation per example], used only at
         # eval time (no batch to pool a joint top-k over for a single inference call). Updated
         # only during training; a buffer, not a parameter — never touched by the optimizer.
         self.register_buffer("running_threshold", torch.tensor(0.0))
         self.register_buffer("threshold_initialized", torch.tensor(False))
-        self.post_init()
-
-    def encode_pre_activation(self, activations: torch.Tensor) -> torch.Tensor:
-        return (activations - self.b_dec) @ self.W_enc + self.b_enc
 
     def _select_batch_topk(self, relu_pre_acts: torch.Tensor) -> torch.Tensor:
         batch_size = relu_pre_acts.shape[0]
@@ -283,35 +273,6 @@ class BatchTopKSAEModel(SAEPreTrainedModel):
         # (JumpReLU-style fixed cutoff). Before any training step has run, this is 0 — i.e. no
         # sparsity constraint yet, an expected cold-start rather than an error.
         return relu_pre_acts * (relu_pre_acts > self.running_threshold).to(relu_pre_acts.dtype)
-
-    def forward(
-        self, activations: torch.Tensor, dead_latent_mask: torch.Tensor | None = None
-    ) -> SAEOutput:
-        latents = self.encode(activations)
-        reconstruction = self.decode(latents)
-        mse_loss = self.reconstruction_loss(activations, reconstruction)
-        l0 = latents.gt(0).sum(dim=-1).float().mean()
-
-        # AuxK only ever shapes training gradients — see TopKSAEModel.forward for why eval
-        # skips it entirely rather than requiring a meaningless mask.
-        aux_loss = None
-        if self.config.auxk_coefficient > 0 and self.training:
-            if dead_latent_mask is None:
-                raise ValueError(
-                    "auxk_coefficient > 0 requires dead_latent_mask (from the training loop's "
-                    "token-windowed dead-latent census) to be passed to forward() while training."
-                )
-            pre_acts = self.encode_pre_activation(activations)
-            residual = activations - reconstruction
-            aux_loss = self.auxk_loss(pre_acts, residual, dead_latent_mask, self.k_aux)
-
-        return SAEOutput(
-            reconstruction=reconstruction,
-            latents=latents,
-            mse_loss=mse_loss,
-            l0=l0,
-            aux_loss=aux_loss,
-        )
 
 
 class _JumpReLUSTE(torch.autograd.Function):
