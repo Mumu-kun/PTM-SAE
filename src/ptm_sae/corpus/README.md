@@ -1,59 +1,46 @@
 # `ptm_sae.corpus`
 
-Ports the partner's `docs/reference/N1.ipynb` (Swiss-Prot acquisition -> CD-HIT clustering ->
-PTM label cascade) into importable modules. See
-`proposal/` and the implementation plan for the full design rationale; this file covers only the
-one operational dependency this subpackage needs that `uv` cannot install for you.
+What is left of the partner's N1 corpus pipeline (`docs/reference/N1.ipynb`) after the build was
+archived: the paths/config, the homology-aware partition assignment with its cd-hit-2d audit
+(`clustering.py`), and the maintenance entry points in `pipeline.py` (`verify_outputs`, `resplit`,
+`upload_to_hf`).
 
-## `cd-hit` / `cd-hit-2d` -- required system binary
+## The corpus build is archived
 
-`corpus/clustering.py::run_cdhit` shells out to the `cd-hit` command-line tool. It is a compiled
-binary, not a Python package -- there is no `uv add` for it, and the environment running
-`corpus/pipeline.py` may not be the same one running SAE training.
+Acquisition of the raw PTM sources (M1), Swiss-Prot filtering and CD-HIT clustering (M2), the PTM label
+cascade (M3), the N1 two-way split and the `--mock` smoke mode were removed from `main`. The published
+corpus is the Hub dataset `mustafa-muhaimin/ptm-sae-corpus` (`corpus/` subfolder); everything downstream
+(training, extraction, the audit, Member 2's evaluation) reads those files, never the build code.
 
-Install one of:
-
-```
-# Debian/Ubuntu
-sudo apt-get install cd-hit
-
-# conda (any platform)
-conda install -c bioconda cd-hit
-
-# macOS (Homebrew)
-brew install cd-hit
-```
-
-Or build from source: https://github.com/weizhongli/cdhit
-
-Verify both binaries are on `PATH` before running M2:
+To rebuild from raw sources (new Swiss-Prot release, another PTM source or type, a label-rule change),
+restore the code from the archive branch and expect to patch it, since nothing has exercised it since:
 
 ```
-cd-hit -h
-cd-hit-2d -h
+git checkout archive/corpus-build -- src/ptm_sae/corpus/
 ```
 
-`clustering.check_cdhit_available()` raises a clear `RuntimeError` naming these install commands
-if either binary is missing, rather than letting `subprocess.run` fail with an opaque
-`FileNotFoundError`.
-
-### Invocation pattern
-
-`run_cdhit` invokes it as:
+## Re-splitting an already-built corpus
 
 ```
-cd-hit -i <fasta> -o <out> -c 0.40 -n 2 -M 0 -T 0 -d 0 -l 1
+uv run python -m ptm_sae.corpus.pipeline              # re-split corpus.parquet in CorpusPaths.processed_dir
+uv run python -m ptm_sae.corpus.pipeline --skip-audit # same, without the cd-hit-2d audit
 ```
 
-The identity threshold (`-c 0.40`) is a fixed, non-configurable value in this codebase (the
-user's decision -- see the implementation plan) rather than a tunable; `-n`/`-l` follow CD-HIT's
-documented word-size/throw-away-length bands for that threshold.
+`resplit` needs no downloads and no clustering: the clusters (`cluster_id`) and labels are already in
+`corpus.parquet` / `labels_stratified.parquet`. `verify_outputs` gates a publish on the leak fraction,
+partition balance and the per-type headline bar.
 
-## Caching / fingerprint caveat (inherited from N1, not silently fixed)
+## `cd-hit-2d` -- required system binary (for the audit only)
 
-`config.config_fingerprint` hashes **config**, not **code**. If you edit parsing or filtering
-*logic* in `acquisition.py`/`clustering.py`/`labels.py` without changing a `Config` field, the
-on-disk cache will not detect the change and will happily reuse stale output. Pass `force=True`
-(or `python -m ptm_sae.corpus.pipeline --force`) after any logic edit. This is the same limitation
-N1's own `FORCE_REBUILD` flag documents -- it is deliberately not "fixed" here (that would be
-separate hardening work, out of scope for this port).
+The homology audit shells out to `cd-hit-2d`. It is a compiled binary, not a Python package: there is no
+`uv add` for it. Install one of:
+
+```
+sudo apt-get install cd-hit        # Debian/Ubuntu
+conda install -c bioconda cd-hit   # any platform
+brew install cd-hit                # macOS
+```
+
+or build from https://github.com/weizhongli/cdhit. `clustering.check_cdhit_available()` raises a clear
+`RuntimeError` if it is missing; pass `--skip-audit` on machines without it (the skip is recorded in
+`split_manifest.json`, and `verify_outputs` then refuses to call the corpus publishable).

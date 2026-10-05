@@ -2,8 +2,8 @@
 
 PTM-type canonicalization and the per-source parsers/reader registry that used to live here
 (PhosphoSitePlus, dbPTM, UniProt-features, CPLM) are retired -- superseded by
-`ptm_sae.corpus.labels`'s chemistry-validated cascade, ported from the partner's N1 pipeline
-(see the implementation plan, decision 5). PhosphoSitePlus itself is deliberately not carried
+the corpus build's chemistry-validated cascade, ported from the partner's N1 pipeline
+(now archived on git branch `archive/corpus-build`; implementation plan, decision 5). PhosphoSitePlus itself is deliberately not carried
 forward: N1 already gets robust phosphorylation coverage from license-clean bulk-downloadable
 sources (CPLM/dbPTM/qPTM).
 

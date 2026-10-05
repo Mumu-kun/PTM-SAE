@@ -22,7 +22,7 @@ The thesis operates on a strict two-member division of labor (see `proposal/Unif
 2. **User (Member 1 — Architecture & Training)**:
    - **Owns**: Phase 1 (extraction/caching), Phase 2 (baseline ablations: TopK vs JumpReLU), Phase 3 (modular topologies: Stratified, PolySAE, CSAE), Phase 4 (Bespoke Modular SAE training: "Arm D").
    - **Current State**: Phase 0 & Phase 1 are 100% complete and verified.
-   - **Remote Data Authority**: Activation shards and manifests live at Hugging Face Dataset `mustafa-muhaimin/ptm-sae-dataset`; the corpus tables (`corpus.parquet`, labels, masks) live in a separate dataset, `mustafa-muhaimin/ptm-sae-corpus` (`corpus/` subfolder).
+   - **Remote Data Authority**: Activation shards and manifests live at Hugging Face Dataset `mustafa-muhaimin/ptm-sae-dataset`; the corpus tables (`corpus.parquet`, labels, masks) live in a separate dataset, `mustafa-muhaimin/ptm-sae-corpus` (`corpus/` subfolder). The code that built the corpus is archived on git branch `archive/corpus-build` (see `src/ptm_sae/corpus/README.md`); `main` keeps only verify/resplit/upload and the partition audit.
 
 ---
 

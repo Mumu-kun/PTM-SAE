@@ -121,12 +121,12 @@ def test_assign_partitions_can_skip_the_audit(monkeypatch, make_corpus, small_sp
     assert report["homology_audit"] == [{"pass": 0, "skipped": True}]
 
 
-def test_resplit_rewrites_outputs_and_keeps_n1_provenance(
+def test_resplit_rewrites_outputs_and_keeps_existing_manifest_keys(
     monkeypatch, tmp_path, make_corpus, small_split_settings
 ):
     proteins, sites = make_corpus(n_clusters=120)
     paths = CorpusPaths(tmp_path / "raw", tmp_path / "interim", tmp_path / "processed")
-    # A corpus as published before the joint split: old-style partition, N1 keys in the manifest.
+    # A published corpus with an old-style partition and keys from an earlier build in its manifest.
     proteins["partition"] = ["held_out" if c % 5 == 0 else "discovery_train" for c in proteins["cluster_id"]]
     sites["partition"] = sites["uniprot_id"].map(dict(zip(proteins["uniprot_id"], proteins["partition"], strict=True)))
     sites["ptm_type"] = sites["type_pooled"]
@@ -144,7 +144,6 @@ def test_resplit_rewrites_outputs_and_keeps_n1_provenance(
     corpus = pd.read_parquet(paths.corpus_parquet)
     labels = pd.read_parquet(paths.labels_stratified)
     assert set(corpus["partition"]) == set(PARTITIONS)
-    assert set(corpus.loc[corpus["cluster_id"] % 5 == 0, "split_n1"]) == {"holdout"}
     assert (corpus.groupby("cluster_id")["partition"].nunique() == 1).all()
     assert labels["partition"].notna().all()
     manifest = json.loads(paths.split_manifest.read_text())
@@ -153,18 +152,18 @@ def test_resplit_rewrites_outputs_and_keeps_n1_provenance(
     assert manifest["homology_audit"] == [{"pass": 0, "skipped": True}]
     assert len(manifest["cluster_to_partition"]) == corpus["cluster_id"].nunique()
 
-    # A second re-split starts from the already-finalized schema (split_n1 present) and still works.
+    # A second re-split starts from the already-finalized schema and still works.
     pipeline.resplit(paths, audit=False)
-    assert pd.read_parquet(paths.corpus_parquet)["split_n1"].isin(["holdout", "discovery"]).all()
+    assert set(pd.read_parquet(paths.corpus_parquet)["partition"]) == set(PARTITIONS)
 
 
-def test_split_settings_relax_hard_constraints_only_in_mock_mode():
-    strict = pipeline._split_settings()
-    mock = pipeline._split_settings(mock=True)
+def test_split_settings_only_switch_the_audit_off():
+    assert pipeline._split_settings().homology_audit == CFG.split.homology_audit
 
-    assert strict.held_min_sites == CFG.holdout_min_sites_per_type
-    assert strict.token_tolerance == CFG.split.token_tolerance
-    assert mock.token_tolerance == 1.0 and mock.held_min_sites == 0
+    quiet = pipeline._split_settings(audit=False)
+
+    assert quiet.homology_audit is False
+    assert quiet.held_min_sites == CFG.split.held_min_sites  # the held-out floor lives in SplitSettings
 
 
 def test_audit_requires_the_cdhit_binary(monkeypatch):
@@ -200,15 +199,7 @@ def _finalized_corpus(monkeypatch, tmp_path, make_corpus, small_split_settings):
     return paths
 
 
-def test_verify_outputs_mock_mode_checks_structure_only(
-    monkeypatch, tmp_path, make_corpus, small_split_settings
-):
-    paths = _finalized_corpus(monkeypatch, tmp_path, make_corpus, small_split_settings)
-
-    assert pipeline.verify_outputs(paths, mock=True) == []
-
-
-def test_verify_outputs_real_mode_reports_each_failed_gate(
+def test_verify_outputs_reports_each_failed_gate(
     monkeypatch, tmp_path, make_corpus, small_split_settings
 ):
     paths = _finalized_corpus(monkeypatch, tmp_path, make_corpus, small_split_settings)
@@ -254,7 +245,7 @@ def test_verify_outputs_catches_structural_damage(
     corpus.loc[members[1], "partition"] = "discovery_val"
     corpus.to_parquet(paths.corpus_parquet, index=False)
 
-    problems = pipeline.verify_outputs(paths, mock=True)
+    problems = pipeline.verify_outputs(paths)
 
     assert "proteins without a partition" in problems
     assert "a homology cluster spans several partitions" in problems

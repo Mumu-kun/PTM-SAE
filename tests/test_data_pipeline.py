@@ -3,9 +3,8 @@
 PTM-type canonicalization, per-source parsers (PhosphoSitePlus, CPLM, UniProt-features), custom
 reader registration, MILP/greedy cluster partitioning, and `prepare_ptm_corpus`/
 `harmonize_and_validate_ptm_sites` were all retired in favor of `ptm_sae.corpus`'s
-chemistry-validated cascade ported from the partner's N1 pipeline (implementation plan, Stage 2).
-Fresh coverage for `ptm_sae.corpus.{acquisition,clustering,labels}` is a real gap left for a
-follow-up session.
+chemistry-validated cascade ported from the partner's N1 pipeline (implementation plan, Stage 2),
+which is now archived on git branch `archive/corpus-build`.
 """
 
 from ptm_sae.corpus.config import CFG

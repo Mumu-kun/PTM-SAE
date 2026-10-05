@@ -77,7 +77,9 @@ ptm-sae-engine/
    - `discovery_train` (~70% of tokens): unsupervised SAE dictionary learning.
    - `discovery_val` (~10% of tokens): SAE hyperparameter tuning, early stopping and the collapse canaries.
    - `held_out` (~20% of tokens): strictly reserved for non-homologous evaluation.
-   - Re-split an already-built corpus without re-clustering: `uv run python -m ptm_sae.corpus.pipeline --resplit` (add `--skip-audit` where `cd-hit-2d` is unavailable).
+   - Re-split an already-built corpus without re-clustering: `uv run python -m ptm_sae.corpus.pipeline` (add `--skip-audit` where `cd-hit-2d` is unavailable).
+
+> The code that built the corpus (steps 1-4: raw-source acquisition, label cascade, CD-HIT clustering) is archived on the git branch `archive/corpus-build`; the published corpus lives at the Hub dataset `mustafa-muhaimin/ptm-sae-corpus`. See `src/ptm_sae/corpus/README.md` for how to restore it.
 
 ---
 

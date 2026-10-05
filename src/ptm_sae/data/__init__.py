@@ -1,7 +1,8 @@
 """Data acquisition and canonical schema subsystem.
 
-Corpus/label preparation itself (acquisition, CD-HIT clustering, the PTM label cascade) now
-lives in `ptm_sae.corpus`, ported from the partner's N1 pipeline (implementation plan, Stage 1).
+Corpus/label preparation itself (acquisition, CD-HIT clustering, the PTM label cascade) was ported
+from the partner's N1 pipeline and is now archived on git branch `archive/corpus-build`; `ptm_sae.corpus`
+keeps only the maintenance side (partition audit, verify, resplit, upload).
 This package keeps only what still applies downstream of that: raw sequence fetching
 (`fetch_uniprot_human_proteome`), FASTA parsing, and the shared `Protein` schema.
 """

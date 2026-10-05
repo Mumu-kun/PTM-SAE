@@ -1,8 +1,8 @@
 """Raw human proteome sequence fetcher.
 
 The PTM-source fetchers that used to live here (`fetch_cplm_human`, `fetch_uniprot_ptm_features`)
-and `harmonize_and_validate_ptm_sites` are retired -- superseded by `ptm_sae.corpus.acquisition`/
-`ptm_sae.corpus.labels`'s chemistry-validated cascade (implementation plan, Stage 2). Only
+and `harmonize_and_validate_ptm_sites` are retired -- superseded by the corpus build's chemistry-validated cascade
+(now archived on git branch `archive/corpus-build`). Only
 `fetch_uniprot_human_proteome` (sequence acquisition, not PTM labels) remains, unaffected by that
 refactor.
 """
