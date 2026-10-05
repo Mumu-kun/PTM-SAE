@@ -82,7 +82,8 @@ mean L0. Collapse and dominance are measured on the final model, not on `best/`.
   slug): added after stage 0 showed that k = 32 at width 4,096 plateaus near 58% explained variance, far below the 85% gate. Five 3,000-step runs
   at k = 64, 128, 256, 512, 1,024 (width 4,096, learning rate 4e-4, canaries off) show where the gate is reached, so the stage-1 k range is
   chosen from data. Real Kaggle throughput measured during stage 0 (about 34k tok/s per run, 60-63k aggregate on two T4s, CPU-bound by the
-  data loader) sets the cost of everything after it.
+  data loader) sets the cost of everything after it. The loader has since been made batch-level (tensor shuffle, fp32 conversion after the
+  shuffle): about 2x faster on its own in a local benchmark, so the figures above are the old, slower loader.
 - **Stage 1, dose-response grid** (`sweeps/topk_grid.yaml`, written after stages 0 and 0.5): width 4,096 at k in {16, 32, 64, 128, 256, 512}; width 10,240
   at k in {64, 128, 256}; 2 extra seeds at the reference cell (k = 64, width 4,096); that cell at 2x LR (H4); AuxK-on (`auxk_coefficient: 0.03125`)
   at width 4,096 with k = 16, 64, 256 and at width 10,240 with k = 64 (H5): 16 runs; 24,000 steps at width 4,096 and about 41,000 at 10,240

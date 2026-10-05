@@ -116,13 +116,17 @@ def load_partition_ids(
 
 
 class ActivationPartitionDataset(IterableDataset):
-    """Streams individual ESM-2 residue activation vectors strictly from one Corpus Partition.
+    """Streams ESM-2 residue activation vectors strictly from one Corpus Partition: single rows, or
+    ready-made (batch_size, d) batches when `batch_size` is set (the training path; load it with
+    `DataLoader(batch_size=None)`).
 
     Cross-references the activation shard manifest (proteins actually extracted) against the
     Corpus Partition manifest (`corpus.parquet`) to isolate exactly the requested partition,
     then hydrates shards on demand via SafeTensorsReader. Shard order is reshuffled every epoch
-    and rows are drawn from a bounded shuffle buffer for approximate i.i.d. sampling without
-    materializing the full corpus in memory. Shards are striped evenly across DataLoader workers.
+    and rows are shuffled in a bounded buffer for approximate i.i.d. sampling without
+    materializing the full corpus in memory: the buffer fills to `shuffle_buffer_size` rows, is
+    permuted once as a tensor and releases its first half, keeping the rest to mix with the next
+    fill. Shards are striped evenly across DataLoader workers.
     """
 
     def __init__(
@@ -142,8 +146,10 @@ class ActivationPartitionDataset(IterableDataset):
         dtype: torch.dtype | None = torch.float32,
         partition_folders: bool = True,
         min_coverage: float = 0.0,
+        batch_size: int | None = None,
     ):
         self.partition = partition
+        self.batch_size = batch_size
         self.cache_dir, self.remote_subpath = partition_root(
             cache_dir, remote_subpath, partition, partition_folders
         )
@@ -248,33 +254,54 @@ class ActivationPartitionDataset(IterableDataset):
             token=self.token,
         )
         row_rng = torch.Generator().manual_seed(self.seed + self.epoch + worker_id + 1)
-        buffer: list[torch.Tensor] = []
+
+        # Shuffle in tensor blocks: one randperm per buffer fill instead of a Python draw per row.
+        # Unshuffled (validation), blocks are released whole and in order.
+        held: list[torch.Tensor] = []
+        held_rows = 0
+        pending: list[torch.Tensor] = []  # released rows not yet cut into a batch
+        pending_rows = 0
+
+        def release(final: bool) -> torch.Tensor:
+            nonlocal held, held_rows
+            block = torch.cat(held)
+            if self.shuffle:
+                block = block[torch.randperm(len(block), generator=row_rng)]
+            released = len(block) if final or not self.shuffle else len(block) // 2
+            held, held_rows = [block[released:]], len(block) - released
+            return block[:released]
+
+        def cast(rows: torch.Tensor) -> torch.Tensor:  # after the shuffle: the shards are fp16, so it moves half the bytes
+            return rows if self.dtype is None else rows.to(self.dtype)
+
+        def batches(block: torch.Tensor) -> Iterator[torch.Tensor]:
+            nonlocal pending, pending_rows
+            if self.batch_size is None:
+                yield from cast(block).unbind(dim=0)
+                return
+            pending.append(block)
+            pending_rows += len(block)
+            if pending_rows < self.batch_size:
+                return
+            stacked = torch.cat(pending)
+            full = len(stacked) // self.batch_size * self.batch_size
+            for batch in stacked[:full].split(self.batch_size):
+                yield cast(batch)
+            pending, pending_rows = [stacked[full:]], len(stacked) - full
 
         try:
             for shard_file in worker_shards:
                 for uniprot_id in self.shard_entries[shard_file]:
                     protein_acts = reader.get_protein_activations(uniprot_id)
-                    if self.dtype is not None:
-                        protein_acts = protein_acts.to(self.dtype)
+                    held.append(protein_acts)
+                    held_rows += len(protein_acts)
+                    if held_rows >= self.shuffle_buffer_size:
+                        yield from batches(release(final=False))
 
-                    if not self.shuffle:
-                        yield from protein_acts.unbind(dim=0)
-                        continue
-
-                    for row in protein_acts.unbind(dim=0):
-                        buffer.append(row)
-                        if len(buffer) >= self.shuffle_buffer_size:
-                            idx = int(
-                                torch.randint(len(buffer), (1,), generator=row_rng)
-                            )
-                            buffer[idx], buffer[-1] = buffer[-1], buffer[idx]
-                            yield buffer.pop()
-
-            if self.shuffle:
-                while buffer:
-                    idx = int(torch.randint(len(buffer), (1,), generator=row_rng))
-                    buffer[idx], buffer[-1] = buffer[-1], buffer[idx]
-                    yield buffer.pop()
+            if held_rows:
+                yield from batches(release(final=True))
+            if pending_rows:  # the last, shorter batch (also the whole stream when it is under one batch)
+                yield cast(torch.cat(pending))
         finally:
             reader.close()
 
@@ -301,7 +328,7 @@ def build_partition_dataloader(
     """Convenience builder wiring an ActivationPartitionDataset into a torch DataLoader.
 
     Returns both the dataset (call `.set_epoch(n)` on it before each epoch to reseed shuffling)
-    and the DataLoader itself, which stacks individual residue rows into (batch_size, hidden_dim).
+    and the DataLoader itself, which yields (batch_size, hidden_dim) batches (the last one may be shorter).
     """
     dataset = ActivationPartitionDataset(
         partition=partition,
@@ -319,10 +346,11 @@ def build_partition_dataloader(
         dtype=dtype,
         partition_folders=partition_folders,
         min_coverage=min_coverage,
+        batch_size=batch_size,
     )
     loader = DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=None,  # the dataset already yields (batch_size, d) tensors
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
     )

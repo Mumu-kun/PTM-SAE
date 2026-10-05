@@ -199,6 +199,48 @@ def test_build_partition_dataloader_batches(tmp_path):
     assert dataset.total_tokens == 7
 
 
+def test_batch_mode_yields_full_batches_then_the_remainder_and_keeps_every_row(tmp_path):
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    dataset = ActivationPartitionDataset(
+        "discovery_train", cache_dir=cache_dir, corpus_dir=corpus_dir, **MIXED,
+        shuffle=True, shuffle_buffer_size=2, seed=1, batch_size=3,
+    )
+
+    batches = list(dataset)
+
+    assert [len(b) for b in batches] == [3, 3, 1]
+    assert sorted(row[0].item() for b in batches for row in b) == [1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0]
+
+
+def test_batch_mode_without_shuffle_keeps_stream_order(tmp_path):
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    dataset = ActivationPartitionDataset(
+        "discovery_train", cache_dir=cache_dir, corpus_dir=corpus_dir, **MIXED,
+        shuffle=False, batch_size=2,
+    )
+
+    batches = list(dataset)
+
+    assert [len(b) for b in batches] == [2, 2, 2, 1]
+    stream = [row[0].item() for b in batches for row in b]
+    assert stream == [1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0]  # protein A's rows, then C's: nothing reordered
+
+
+def test_batch_mode_mixes_rows_across_proteins_within_a_batch(tmp_path):
+    """A buffer holding several proteins must interleave them, or batches would be single-protein runs."""
+    cache_dir, corpus_dir = _write_fixture(tmp_path)
+    dataset = ActivationPartitionDataset(
+        "discovery_train", cache_dir=cache_dir, corpus_dir=corpus_dir, **MIXED,
+        shuffle=True, shuffle_buffer_size=7, seed=0, batch_size=7,
+    )
+
+    (batch,) = list(dataset)
+
+    assert sorted(batch[:, 0].tolist()) == [1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0]
+    assert batch[:, 0].tolist() != [1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0]
+    assert batch[:, 0].tolist() != [3.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0]
+
+
 def _stamp_manifest(cache_dir: Path, fingerprint: str | None) -> None:
     manifest_path = cache_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

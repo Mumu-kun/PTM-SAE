@@ -95,7 +95,7 @@ Validation EV (%) at each evaluation (every 500 steps), so the shape of each run
 | 3 | Which LR for the long runs? | 2e-4 to 8e-4 are indistinguishable at both widths, so one value may serve both | Use 1e-4 to 2e-4 (about a quarter to a half of the short-budget region) for stage 1; the 2x-LR run (H4) is the check |
 | 4 | Is a finer LR grid worth it? | Differences near the optimum are within plausible noise | No: skip, per the decision not to chase small gaps; seed spread from the reference-cell seeds in stage 1 gives the noise scale |
 | 5 | Does AuxK change anything? | Dead latents appear at high LR even at k = 32; at larger widths and small k they will be worse | Stage 1 AuxK-on pairs (H5), unchanged |
-| 6 | Throughput | Stage 1 cost depends on a CPU-bound per-row data loader (about 34k tok/s per run, 60 to 63k aggregate) | Batch-level loader fix is proposed and awaits a decision; it would roughly halve stage-1 wall time |
+| 6 | Throughput | Stage 1 cost depends on a CPU-bound per-row data loader (about 34k tok/s per run, 60 to 63k aggregate) | Done: the dataset now shuffles and cuts batches as tensors (`batch_size` mode of `ActivationPartitionDataset`) and converts fp16 to fp32 after the shuffle. On a synthetic 1,280-dim shard set the loader went from about 41 ms to about 18 to 21 ms per 4,096-row batch (2.0 to 2.3x) on a local PC. The k-probe note records the real Kaggle gain once measured |
 
 ## 6. Decisions this stage fixes
 
