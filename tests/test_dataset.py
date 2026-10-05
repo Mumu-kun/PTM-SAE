@@ -256,3 +256,16 @@ def test_dataset_warns_on_partial_coverage_of_legacy_manifest(tmp_path):
     with pytest.warns(UserWarning, match=r"1/2 discovery_train.*predates corpus stamping"):
         ActivationPartitionDataset("discovery_train", cache_dir, corpus_dir=corpus_dir)
 
+
+
+def test_partition_root_switches_between_the_per_partition_and_mixed_layouts():
+    from pathlib import Path
+
+    from ptm_sae.training.dataset import partition_root
+
+    assert partition_root("cache/a", "act/m/l24", "discovery_val", False) == (Path("cache/a"), "act/m/l24")
+    assert partition_root("cache/a", "act/m/l24/", "discovery_val", True) == (
+        Path("cache/a/discovery_val"),
+        "act/m/l24/discovery_val",
+    )
+    assert partition_root("cache/a", None, "discovery_train", True) == (Path("cache/a/discovery_train"), "discovery_train")

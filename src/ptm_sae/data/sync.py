@@ -15,7 +15,11 @@ from typing import Literal
 from ptm_sae import runtime
 from ptm_sae.extraction.hub import HfSyncClient, compute_sha256
 from ptm_sae.training.config import SAETrainingConfig
-from ptm_sae.training.dataset import ActivationPartitionDataset, Partition
+from ptm_sae.training.dataset import (
+    ActivationPartitionDataset,
+    Partition,
+    partition_root,
+)
 
 # (filename, required) — mirrors what the training loop and its canaries read from corpus_dir.
 CORPUS_FILES = (
@@ -36,6 +40,7 @@ class SyncTarget:
     name: str
     local_path: Path
     required: bool = True
+    label: str = ""  # report key when `name` alone is ambiguous (the same file name in two partitions)
 
 
 @dataclass
@@ -67,6 +72,7 @@ def _sync_targets(
             )
 
         size, sha256 = info
+        key = target.label or target.name
         if force:
             reason = "forced"
         elif not target.local_path.exists():
@@ -76,7 +82,7 @@ def _sync_targets(
         elif verify and sha256 and compute_sha256(target.local_path) != sha256:
             reason = "checksum mismatch"
         else:
-            report.up_to_date.append(target.name)
+            report.up_to_date.append(key)
             continue
 
         # hydrate_shard writes atomically and replaces the old file only once the new one passed
@@ -88,7 +94,7 @@ def _sync_targets(
             target.local_path,
             expected_bytes=size,
         )
-        report.fetched[target.name] = reason
+        report.fetched[key] = reason
 
 
 def sync_data(
@@ -128,13 +134,17 @@ def sync_data(
     if what == "corpus":
         return report
 
-    # 2. Shard manifest, then only the shards that hold the requested partitions' proteins.
+    # 2. Per partition: its shard manifest, then only the shards that hold its proteins.
     cache_dir = Path(config.cache_dir)
-    sub = config.remote_subpath.rstrip("/") if config.remote_subpath else ""
-    sync(config.remote_repo_id, [SyncTarget(sub or None, "manifest.json", cache_dir / "manifest.json")])
-
-    shard_files: set[str] = set()
+    sub = config.remote_subpath.rstrip("/") if config.remote_subpath else None
     for partition in partitions:
+        local_root, remote_root = partition_root(cache_dir, sub, partition, config.partition_folders)
+        prefix = f"{partition}/" if config.partition_folders else ""
+        sync(
+            config.remote_repo_id,
+            [SyncTarget(remote_root, "manifest.json", local_root / "manifest.json", label=f"{prefix}manifest.json")],
+        )
+
         # Everything is local now, so no remote_repo_id: this only cross-references the
         # manifest against the partition's IDs.
         dataset = ActivationPartitionDataset(
@@ -142,17 +152,16 @@ def sync_data(
             cache_dir=cache_dir,
             corpus_dir=corpus_dir,
             remote_repo_id=None,
+            partition_folders=config.partition_folders,
         )
-        shard_files.update(dataset.shard_files)
-
-    shards_subpath = f"{sub}/shards" if sub else "shards"
-    sync(
-        config.remote_repo_id,
-        [
-            SyncTarget(shards_subpath, name, cache_dir / name)
-            for name in sorted(shard_files)
-        ]
-    )
+        shards_subpath = f"{remote_root}/shards" if remote_root else "shards"
+        sync(
+            config.remote_repo_id,
+            [
+                SyncTarget(shards_subpath, name, local_root / name, label=f"{prefix}{name}")
+                for name in sorted(dataset.shard_files)
+            ],
+        )
     return report
 
 

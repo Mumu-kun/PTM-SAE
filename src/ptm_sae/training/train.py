@@ -361,6 +361,7 @@ def run_sae_training(
             num_workers=0,
             shuffle=True,
             seed=config.seed,
+            partition_folders=config.partition_folders,
         )
         bias_init_sample: list[torch.Tensor] = []
         bias_init_tokens = 0
@@ -453,6 +454,7 @@ def run_sae_training(
         num_workers=config.num_workers,
         shuffle_buffer_size=config.shuffle_buffer_size,
         seed=config.seed,
+        partition_folders=config.partition_folders,
     )
     _, val_loader = build_partition_dataloader(
         "discovery_val",
@@ -466,6 +468,7 @@ def run_sae_training(
         max_cached_shards=config.max_cached_shards,
         num_workers=0,
         shuffle=False,
+        partition_folders=config.partition_folders,
     )
 
     # Dead-latent census: token-windowed, owned by the training loop (not the model) so the

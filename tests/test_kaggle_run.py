@@ -32,6 +32,19 @@ def test_inject_mode_sets_the_default_and_leaves_the_rest_alone(kaggle_run):
     assert any('os.environ.get("PTM_SAE_MODE", "real")' in s for s in original)
 
 
+def test_inject_mode_sets_the_phases_default_when_given(kaggle_run):
+    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+
+    both = kaggle_run.inject_mode(notebook, "real", "both")
+
+    sources = ["".join(c["source"]) for c in both["cells"]]
+    assert sum('os.environ.get("PTM_SAE_PHASES", "both")' in s for s in sources) == 1
+    untouched = kaggle_run.inject_mode(notebook, "real")
+    assert any('os.environ.get("PTM_SAE_PHASES", "corpus")' in "".join(c["source"]) for c in untouched["cells"])
+    with pytest.raises(ValueError, match="phases"):
+        kaggle_run.inject_mode(notebook, "real", "everything")
+
+
 def test_inject_mode_rejects_bad_input(kaggle_run):
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     with pytest.raises(ValueError, match="smoke"):

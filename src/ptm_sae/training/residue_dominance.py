@@ -16,6 +16,7 @@ from huggingface_hub import hf_hub_download
 
 from ptm_sae.extraction.hub import resolve_hf_token, retry_with_backoff
 from ptm_sae.extraction.reader import SafeTensorsReader
+from ptm_sae.training.dataset import partition_root
 
 # Standard 20 amino acids; anything else (rare/ambiguous codes) falls into one shared "unknown"
 # bucket rather than growing the vocabulary per oddity in the sequence data.
@@ -122,10 +123,13 @@ def run_residue_dominance_check(
     """One pass over discovery_val proteins, read directly via SafeTensorsReader (bypassing the
     shuffled training DataLoader — order doesn't matter here)."""
     model.eval()
+    cache_dir, remote_subpath = partition_root(
+        config.cache_dir, config.remote_subpath, "discovery_val", config.partition_folders
+    )
     reader = SafeTensorsReader(
-        cache_dir=config.cache_dir,
+        cache_dir=cache_dir,
         remote_repo_id=config.remote_repo_id,
-        remote_subpath=config.remote_subpath,
+        remote_subpath=remote_subpath,
         max_cached_shards=config.max_cached_shards,
     )
     accumulator = ResidueDominanceAccumulator(config.d_hidden, top_k, device)

@@ -60,6 +60,11 @@ class ShardingConfig(BaseModel):
         default=None,
         description="LRU shard retention limit on local disk for constrained instances",
     )
+    free_local_after_upload: bool = Field(
+        default=False,
+        description="Delete each local shard once it is uploaded (needs remote_repo_id): lets a run "
+        "write more shard bytes than the local disk holds, e.g. Kaggle's 20 GB working directory",
+    )
     corpus_fingerprint: str | None = Field(
         default=None,
         description="Identity of the corpus.parquet this extraction draws from (see "

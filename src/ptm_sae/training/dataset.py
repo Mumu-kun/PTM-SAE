@@ -38,6 +38,17 @@ def corpus_fingerprint(corpus_parquet: str | Path) -> str:
     return digest.hexdigest()
 
 
+def partition_root(
+    cache_dir: str | Path, remote_subpath: str | None, partition: str, partition_folders: bool
+) -> tuple[Path, str | None]:
+    """Local and remote root of a partition's activation shards: `<root>/<partition>` for the
+    per-partition layout extraction writes, the shared root for the older mixed layout."""
+    if not partition_folders:
+        return Path(cache_dir), remote_subpath
+    remote = f"{remote_subpath.rstrip('/')}/{partition}" if remote_subpath else partition
+    return Path(cache_dir) / partition, remote
+
+
 def load_partition_ids(
     partition: Partition,
     corpus_dir: str | Path = "data/processed",
@@ -106,8 +117,12 @@ class ActivationPartitionDataset(IterableDataset):
         shuffle_buffer_size: int = 65536,
         seed: int = 0,
         dtype: torch.dtype | None = torch.float32,
+        partition_folders: bool = False,
     ):
         self.partition = partition
+        cache_dir, remote_subpath = partition_root(
+            cache_dir, remote_subpath, partition, partition_folders
+        )
         self.cache_dir = cache_dir
         self.remote_repo_id = remote_repo_id
         self.remote_subpath = remote_subpath
@@ -251,6 +266,7 @@ def build_partition_dataloader(
     shuffle_buffer_size: int = 65536,
     seed: int = 0,
     dtype: torch.dtype | None = torch.float32,
+    partition_folders: bool = False,
 ) -> tuple[ActivationPartitionDataset, DataLoader]:
     """Convenience builder wiring an ActivationPartitionDataset into a torch DataLoader.
 
@@ -271,6 +287,7 @@ def build_partition_dataloader(
         shuffle_buffer_size=shuffle_buffer_size,
         seed=seed,
         dtype=dtype,
+        partition_folders=partition_folders,
     )
     loader = DataLoader(
         dataset,

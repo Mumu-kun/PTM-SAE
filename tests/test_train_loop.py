@@ -155,6 +155,7 @@ def test_topk_training_loop_runs_and_checkpoints(tmp_path):
         eval_interval_steps=3,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -186,6 +187,7 @@ def test_jumprelu_training_loop_runs_and_checkpoints(tmp_path):
         eval_interval_steps=3,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -233,6 +235,7 @@ def test_batchtopk_training_loop_runs_and_checkpoints(tmp_path):
         eval_interval_steps=3,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -263,6 +266,7 @@ def test_topk_training_loop_logs_tier2_diagnostics(tmp_path, capsys):
         eval_interval_steps=3,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -302,6 +306,7 @@ def test_collapse_check_runs_end_to_end(tmp_path, capsys):
         collapse_check_interval_steps=4,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -340,6 +345,7 @@ def test_collapse_check_wandb_logging_runs_offline(tmp_path, monkeypatch):
         collapse_check_interval_steps=4,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -376,6 +382,7 @@ def test_ptm_concentration_check_reports_three_sections(tmp_path):
         k=4,
         total_steps=1,
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -417,6 +424,7 @@ def test_residue_dominance_check_runs_end_to_end(tmp_path, capsys):
         residue_dominance_top_k=3,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -453,6 +461,7 @@ def test_residue_dominance_accumulator_reports_valid_collapse_rate(tmp_path):
         k=4,
         total_steps=1,
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -483,6 +492,7 @@ def test_gated_training_loop_logs_free_architecture_metrics(tmp_path, capsys):
         eval_interval_steps=3,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -513,6 +523,7 @@ def test_batchtopk_training_loop_logs_running_threshold(tmp_path, capsys):
         eval_interval_steps=3,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -543,6 +554,7 @@ def test_jumprelu_training_loop_logs_threshold_stats(tmp_path, capsys):
         eval_interval_steps=3,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -574,6 +586,7 @@ def test_resume_from_continues_step_count_and_optimizer_state(tmp_path):
         batch_size=8,
         eval_interval_steps=3,
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,
@@ -629,6 +642,7 @@ def test_gated_training_loop_runs_and_checkpoints(tmp_path):
         eval_interval_steps=3,
         checkpoint_dir=str(checkpoint_dir),
         cache_dir=str(cache_dir),
+        partition_folders=False,  # the fixture writes one mixed-layout shard set
         remote_repo_id=None,
         remote_corpus_repo_id=None,
         remote_subpath=None,

@@ -23,6 +23,7 @@ collapse_check_interval_steps: 100
 enable_residue_dominance_check: true
 
 cache_dir: cache/activations/pilot_8m
+partition_folders: false  # the 8M pilot predates per-partition shards
 remote_repo_id: mustafa-muhaimin/ptm-sae-corpus
 remote_subpath: activations/esm2_t6_8M_UR50D/layer_4
 remote_corpus_repo_id: mustafa-muhaimin/ptm-sae-corpus

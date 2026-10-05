@@ -94,6 +94,9 @@ class SAETrainingConfig(BaseModel):
     cache_dir: str = "cache/activations/esm2_650m_l24"
     remote_repo_id: str | None = "mustafa-muhaimin/ptm-sae-dataset"
     remote_subpath: str | None = "activations/esm2_t33_650M_UR50D/layer_24"
+    # Extraction writes one shard set per partition: train reads <cache_dir>/discovery_train and
+    # validation <cache_dir>/discovery_val. False reads the older mixed layout (one manifest at the root).
+    partition_folders: bool = True
     corpus_dir: str = "data/processed"
     # The corpus tables live in their own Hub dataset, separate from the (much larger) activations.
     remote_corpus_repo_id: str | None = "mustafa-muhaimin/ptm-sae-corpus"

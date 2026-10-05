@@ -30,6 +30,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from ptm_sae.corpus.config import CFG
 from ptm_sae.extraction.hub import resolve_hf_token, retry_with_backoff
 from ptm_sae.extraction.reader import SafeTensorsReader
+from ptm_sae.training.dataset import partition_root
 
 # A latent firing on modified residues at 2x a stratum's own base rate is treated as a
 # candidate non-generic (PTM-associated) feature worth flagging — a heuristic canary
@@ -445,10 +446,13 @@ def run_ptm_concentration_check(
     )
 
     model.eval()
+    cache_dir, remote_subpath = partition_root(
+        config.cache_dir, config.remote_subpath, "discovery_val", config.partition_folders
+    )
     reader = SafeTensorsReader(
-        cache_dir=config.cache_dir,
+        cache_dir=cache_dir,
         remote_repo_id=config.remote_repo_id,
-        remote_subpath=config.remote_subpath,
+        remote_subpath=remote_subpath,
         max_cached_shards=config.max_cached_shards,
     )
     accumulator = PTMConcentrationAccumulator(

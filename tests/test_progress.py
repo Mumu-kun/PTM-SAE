@@ -221,6 +221,6 @@ def test_full_lifecycle_progress_integration(tmp_path):
         progress_manager=pm,
     )
 
-    assert "sharding_manifest" in results
+    assert "discovery_train" in results["sharding_manifests"]
     assert stages_started == [1, 2, 3, 4, 5]
     assert stages_finished == [1, 2, 3, 4, 5]

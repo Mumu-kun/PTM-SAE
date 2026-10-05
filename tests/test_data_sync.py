@@ -74,8 +74,31 @@ def remote_and_config(tmp_path):
         remote_subpath=SUBPATH,
         cache_dir="cache",
         corpus_dir="processed",
+        partition_folders=False,
     ).with_data_root(tmp_path / "local")
     return FakeHub(remote), config
+
+
+def test_per_partition_layout_syncs_each_partitions_own_folder(remote_and_config):
+    hub, config = remote_and_config
+    activations = hub.remote_root / REPO / SUBPATH
+    for partition, (shard, protein) in {"discovery_train": ("shard_0000", "protA"), "discovery_val": ("shard_0001", "protC")}.items():
+        (activations / partition / "shards").mkdir(parents=True)
+        (activations / partition / "shards" / f"{shard}.safetensors").write_bytes(b"x" * 100)
+        entry = {protein: {"uniprot_id": protein, "length": 5, "shard_file": f"{shard}.safetensors"}}
+        (activations / partition / "manifest.json").write_text(json.dumps({"shards": [], "entries": entry}), encoding="utf-8")
+
+    report = sync_data(config.model_copy(update={"partition_folders": True}), hub=hub)
+
+    assert sorted(report.fetched) == [
+        "corpus.parquet",
+        "discovery_train/manifest.json",
+        "discovery_train/shard_0000.safetensors",
+        "discovery_val/manifest.json",
+        "discovery_val/shard_0001.safetensors",
+        "labels_stratified.parquet",
+    ]
+    assert (Path(config.cache_dir) / "discovery_val" / "shard_0001.safetensors").exists()
 
 
 def test_default_fetches_only_what_is_missing(remote_and_config):

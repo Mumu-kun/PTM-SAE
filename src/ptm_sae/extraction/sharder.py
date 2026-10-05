@@ -228,6 +228,8 @@ class SafeTensorsSharder:
             sub = self.cfg.remote_subpath.rstrip("/") if self.cfg.remote_subpath else ""
             shards_subpath = f"{sub}/shards" if sub else "shards"
 
+            free_local = self.cfg.free_local_after_upload
+
             def _async_upload(
                 s_path=shard_path, m_path=mean_path, man_path=self.manifest_path
             ):
@@ -235,6 +237,8 @@ class SafeTensorsSharder:
                 if m_path.exists():
                     hub_client.upload_shard(remote_repo, sub or None, m_path)
                 hub_client.upload_manifest(remote_repo, sub or None, man_path)
+                if free_local:  # an exception above keeps the shard for the next attempt
+                    s_path.unlink(missing_ok=True)
 
             if self._upload_pool:
                 fut = self._upload_pool.submit(_async_upload)

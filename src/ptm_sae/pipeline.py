@@ -170,12 +170,22 @@ def run_full_lifecycle(
     if max_proteins is not None:
         target_proteins = target_proteins[:max_proteins]
 
-    # 3. ESM-2 activation extraction and sharded buffering
-    sharding_manifest = run_extraction_pipeline(
-        config=config,
-        proteins=target_proteins,
-        progress_manager=pm,
-    )
+    # 3. ESM-2 activation extraction and sharded buffering, one shard set (own folder, own manifest)
+    # per partition, so a partition can be fetched or attached as a Kaggle Dataset without the others.
+    by_partition: dict[str, list[Protein]] = {}
+    for protein in target_proteins:
+        by_partition.setdefault(protein.partition, []).append(protein)
+
+    sharding_manifests = {}
+    for partition, partition_proteins in by_partition.items():
+        partition_config = config.model_copy(deep=True)
+        partition_config.sharding.output_dir = f"{config.sharding.output_dir}/{partition}"
+        partition_config.sharding.remote_subpath = f"{resolved_subpath}/{partition}"
+        sharding_manifests[partition] = run_extraction_pipeline(
+            config=partition_config,
+            proteins=partition_proteins,
+            progress_manager=pm,
+        )
 
     # 4. Remote hub sync status (shard/manifest upload itself already ran asynchronously,
     # inside stage 3, via SafeTensorsSharder's own HfSyncClient), plus an optional Kaggle
@@ -218,26 +228,27 @@ def run_full_lifecycle(
     # 5. Zero-copy readback sanity verification
     pm.start_stage(5, total_items=1, info="Zero-copy readback sanity check")
 
-    reader = SafeTensorsReader(
-        cache_dir=config.sharding.output_dir,
-        remote_repo_id=resolved_repo,
-        remote_subpath=resolved_subpath,
-        token=resolved_token,
-    )
-    available_proteins = reader.list_proteins()
+    indexed = 0
     probe_summary = "No proteins available"
-    if available_proteins:
-        probe_id = available_proteins[0]
-        acts = reader.get_protein_activations(probe_id)
-        _res_1 = reader.get_residue_activation(probe_id, 1)
-        mean_vec = reader.get_mean_pooled_embedding(probe_id)
-        probe_summary = (
-            f"Probe '{probe_id}' verified: acts {acts.shape}, mean {mean_vec.shape}"
+    for partition in by_partition:
+        reader = SafeTensorsReader(
+            cache_dir=f"{config.sharding.output_dir}/{partition}",
+            remote_repo_id=resolved_repo,
+            remote_subpath=f"{resolved_subpath}/{partition}",
+            token=resolved_token,
         )
+        available_proteins = reader.list_proteins()
+        indexed += len(available_proteins)
+        if available_proteins:
+            probe_id = available_proteins[0]
+            acts = reader.get_protein_activations(probe_id)
+            _res_1 = reader.get_residue_activation(probe_id, 1)
+            mean_vec = reader.get_mean_pooled_embedding(probe_id)
+            probe_summary = f"Probe '{probe_id}' ({partition}) verified: acts {acts.shape}, mean {mean_vec.shape}"
 
     pm.finish_stage(
         5,
-        summary=f"{len(available_proteins)} proteins indexed in SafeTensors manifest | {probe_summary}",
+        summary=f"{indexed} proteins indexed across {len(by_partition)} partition manifest(s) | {probe_summary}",
     )
 
     pm.print("\n" + "═" * 72)
@@ -246,7 +257,7 @@ def run_full_lifecycle(
 
     return {
         "protein_count": len(target_proteins),
-        "sharding_manifest": sharding_manifest,
+        "sharding_manifests": sharding_manifests,
         "output_dir": config.sharding.output_dir,
         "processed_dir": str(processed_path),
         "remote_repo_id": resolved_repo,

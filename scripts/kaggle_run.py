@@ -19,19 +19,26 @@ import tempfile
 from pathlib import Path
 
 MODE_DEFAULT = 'os.environ.get("PTM_SAE_MODE", "real")'
+PHASES_DEFAULT = 'os.environ.get("PTM_SAE_PHASES", "corpus")'
 
 
-def inject_mode(notebook: dict, mode: str) -> dict:
-    """Copy of `notebook` whose PTM_SAE_MODE default is `mode` (smoke | real)."""
+def inject_mode(notebook: dict, mode: str, phases: str | None = None) -> dict:
+    """Copy of `notebook` whose PTM_SAE_MODE default is `mode` (smoke | real) and, when given, whose
+    PTM_SAE_PHASES default is `phases` (corpus | extraction | both)."""
     if mode not in ("smoke", "real"):
         raise ValueError(f"mode must be 'smoke' or 'real', not {mode!r}")
+    if phases not in (None, "corpus", "extraction", "both"):
+        raise ValueError(f"phases must be 'corpus', 'extraction' or 'both', not {phases!r}")
     patched = json.loads(json.dumps(notebook))
     replaced = 0
     for cell in patched["cells"]:
         source = "".join(cell["source"])
         if MODE_DEFAULT in source:
             replaced += 1
-            lines = source.replace(MODE_DEFAULT, f'os.environ.get("PTM_SAE_MODE", "{mode}")').split("\n")
+            source = source.replace(MODE_DEFAULT, f'os.environ.get("PTM_SAE_MODE", "{mode}")')
+            if phases:
+                source = source.replace(PHASES_DEFAULT, f'os.environ.get("PTM_SAE_PHASES", "{phases}")')
+            lines = source.split("\n")
             cell["source"] = [line + "\n" for line in lines[:-1]] + [lines[-1]]
     if not replaced:
         raise ValueError("notebook has no PTM_SAE_MODE parameter to set")
@@ -72,6 +79,7 @@ def main() -> None:
     push.add_argument("notebook", type=Path)
     push.add_argument("--slug", required=True, help="kernel slug, e.g. ptm-sae-corpus-build")
     push.add_argument("--mode", choices=["smoke", "real"], default="real")
+    push.add_argument("--phases", choices=["corpus", "extraction", "both"], help="corpus notebook only; default corpus (CPU); extraction needs --gpu")
     push.add_argument("--gpu", action="store_true", help="GPU accelerator (default: CPU only, saves the weekly GPU quota)")
     for name in ("status", "output"):
         cmd = sub.add_parser(name)
@@ -83,14 +91,14 @@ def main() -> None:
     kernel = f"{username}/{args.slug}"
 
     if args.command == "push":
-        notebook = inject_mode(json.loads(args.notebook.read_text(encoding="utf-8")), args.mode)
+        notebook = inject_mode(json.loads(args.notebook.read_text(encoding="utf-8")), args.mode, args.phases)
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             (folder / args.notebook.name).write_text(json.dumps(notebook, indent=1), encoding="utf-8")
             metadata = build_metadata(username, args.slug, args.notebook.name, args.gpu)
             (folder / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             print(api.kernels_push(str(folder)))
-        print(f"pushed {kernel} (mode={args.mode}, gpu={args.gpu}); status: python scripts/kaggle_run.py status --slug {args.slug}")
+        print(f"pushed {kernel} (mode={args.mode}, phases={args.phases}, gpu={args.gpu}); status: python scripts/kaggle_run.py status --slug {args.slug}")
     elif args.command == "status":
         status = api.kernels_status(kernel)
         print(f"{kernel}: {status.status} {getattr(status, 'failure_message', None) or ''}")
