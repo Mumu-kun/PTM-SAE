@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-NOTEBOOKS = ("notebooks/kaggle_pipeline.ipynb", "notebooks/train_sae.ipynb", "notebooks/train_sae_k_probe.ipynb")
+NOTEBOOKS = ("notebooks/kaggle_pipeline.ipynb", "notebooks/train_sae.ipynb", "notebooks/train_sae_k_probe.ipynb", "notebooks/diagnose_activations.ipynb")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LONG_JOB_CALLS = ("run_logged(", "upload_to_hf(", "fetch_run(", "publish_kaggle_dataset(")
 
